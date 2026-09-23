@@ -30,6 +30,8 @@ import { useAllChannelSummarys } from '@/features/channels/data/channels';
 import { useUpdateApiKeyProfileTemplate } from '../data/apikeys';
 import { normalizeRoutingPolicyValue, type ApiKeyProfileTemplate } from '../data/schema';
 import { formSchemaFactory, type FormValues } from '../data/template-form-schema';
+import { seedChannelWeights } from '../utils/channel-weight-list';
+import { firstChannelWeightsError, ProfileChannelWeightsEditor } from './profile-channel-weights-editor';
 
 interface ApiKeyEditTemplateDialogProps {
   open: boolean;
@@ -42,8 +44,10 @@ export function ApiKeyEditTemplateDialog({ open, onOpenChange, template }: ApiKe
   const selectedProjectId = useSelectedProjectId();
   const updateTemplate = useUpdateApiKeyProfileTemplate();
   const { data: availableModels, mutateAsync: fetchModels } = useQueryModels();
-  const { data: channelsData } = useAllChannelSummarys(selectedProjectId, { enabled: true });
+  const { data: channelsData, isLoading: channelsLoading } = useAllChannelSummarys(selectedProjectId, { enabled: true });
   const [dialogContent, setDialogContent] = useState<HTMLDivElement | null>(null);
+
+  const channelSummaries = useMemo(() => channelsData?.edges?.map((edge) => edge.node) ?? [], [channelsData]);
   const [publishValues, setPublishValues] = useState<FormValues | null>(null);
 
   const allTags = useMemo(() => {
@@ -134,6 +138,35 @@ export function ApiKeyEditTemplateDialog({ open, onOpenChange, template }: ApiKe
   const isExcludeMode = channelTagsMatchMode === 'none';
   const hasQuota = form.watch('profile.quota') != null;
   const quotaPeriodType = form.watch('profile.quota.period.type');
+  const independentChannelWeights = form.watch('profile.independentChannelWeights') === true;
+
+  // Turning the mode on seeds the list from the allowed channels so an existing
+  // profile keeps working. Nothing is cleared when it is turned off.
+  const handleToggleIndependentChannelWeights = useCallback(
+    (checked: boolean) => {
+      form.setValue('profile.independentChannelWeights', checked, { shouldDirty: true, shouldValidate: true });
+
+      if (!checked) {
+        return;
+      }
+
+      const currentWeights = form.getValues('profile.channelWeights') ?? [];
+      const currentChannelIDs = form.getValues('profile.channelIDs') ?? [];
+
+      if (currentWeights.length > 0 || currentChannelIDs.length === 0) {
+        return;
+      }
+
+      const globalWeightOf = (channelID: number) =>
+        channelSummaries.find((channel) => parseInt(extractNumberID(channel.id), 10) === channelID)?.orderingWeight;
+
+      form.setValue('profile.channelWeights', seedChannelWeights(currentChannelIDs, globalWeightOf), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+    },
+    [channelSummaries, form]
+  );
 
   const publishTemplate = async (values: FormValues) => {
     try {
@@ -347,96 +380,148 @@ export function ApiKeyEditTemplateDialog({ open, onOpenChange, template }: ApiKe
                   />
                 </div>
 
+                {/* Independent Channel Weights Section */}
                 <div className='border-t pt-6'>
-                  <h4 className='mb-3 text-sm font-medium'>{t('apikeys.profiles.allowedChannels')}</h4>
-                  <p className='text-muted-foreground mb-3 text-xs'>{t('apikeys.profiles.allowedChannelsDescription')}</p>
                   <FormField
                     control={form.control}
-                    name='profile.channelIDs'
+                    name='profile.independentChannelWeights'
                     render={({ field }) => (
-                      <FormItem>
+                      <FormItem className='flex items-start justify-between gap-3'>
+                        <div>
+                          <FormLabel className='text-sm font-medium'>{t('apikeys.profiles.independentChannelWeights')}</FormLabel>
+                          <p className='text-muted-foreground mt-1 text-xs'>{t('apikeys.profiles.independentChannelWeightsDescription')}</p>
+                        </div>
                         <FormControl>
-                          <TagsAutocompleteInput
-                            value={(field.value || []).map((id) => {
-                              const channel = channelsData?.edges?.find((edge) => parseInt(extractNumberID(edge.node.id), 10) === id);
-                              return channel?.node.name || id.toString();
-                            })}
-                            onChange={(tags) => {
-                              const ids = tags
-                                .map((tag) => {
-                                  const channel = channelsData?.edges?.find((edge) => edge.node.name === tag);
-                                  return channel ? parseInt(extractNumberID(channel.node.id), 10) : parseInt(tag);
-                                })
-                                .filter((id) => !isNaN(id));
-                              field.onChange(ids);
-                            }}
-                            placeholder={t('apikeys.profiles.allowedChannels')}
-                            suggestions={channelsData?.edges?.map((edge) => edge.node.name) || []}
-                            className='h-auto min-h-9 py-1'
-                          />
+                          <Switch checked={field.value === true} onCheckedChange={handleToggleIndependentChannelWeights} />
                         </FormControl>
-                        <FormMessage />
                       </FormItem>
                     )}
                   />
                 </div>
 
-                <div className='border-t pt-6'>
-                  <div className='mb-3 flex items-start justify-between gap-3'>
-                    <div>
-                      <h4 className='text-sm font-medium'>
-                        {t(isExcludeMode ? 'apikeys.profiles.excludedChannelTags' : 'apikeys.profiles.allowedChannelTags')}
-                      </h4>
-                      <p className='text-muted-foreground mt-1 text-xs'>
-                        {t(
-                          isExcludeMode
-                            ? 'apikeys.profiles.excludedChannelTagsDescription'
-                            : 'apikeys.profiles.allowedChannelTagsDescription'
+                {!independentChannelWeights && (
+                  <>
+                    <div className='border-t pt-6'>
+                      <h4 className='mb-3 text-sm font-medium'>{t('apikeys.profiles.allowedChannels')}</h4>
+                      <p className='text-muted-foreground mb-3 text-xs'>{t('apikeys.profiles.allowedChannelsDescription')}</p>
+                      <FormField
+                        control={form.control}
+                        name='profile.channelIDs'
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormControl>
+                              <TagsAutocompleteInput
+                                value={(field.value || []).map((id) => {
+                                  const channel = channelsData?.edges?.find((edge) => parseInt(extractNumberID(edge.node.id), 10) === id);
+                                  return channel?.node.name || id.toString();
+                                })}
+                                onChange={(tags) => {
+                                  const ids = tags
+                                    .map((tag) => {
+                                      const channel = channelsData?.edges?.find((edge) => edge.node.name === tag);
+                                      return channel ? parseInt(extractNumberID(channel.node.id), 10) : parseInt(tag);
+                                    })
+                                    .filter((id) => !isNaN(id));
+                                  field.onChange(ids);
+                                }}
+                                placeholder={t('apikeys.profiles.allowedChannels')}
+                                suggestions={channelsData?.edges?.map((edge) => edge.node.name) || []}
+                                className='h-auto min-h-9 py-1'
+                              />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
                         )}
-                      </p>
+                      />
                     </div>
+
+                    <div className='border-t pt-6'>
+                      <div className='mb-3 flex items-start justify-between gap-3'>
+                        <div>
+                          <h4 className='text-sm font-medium'>
+                            {t(isExcludeMode ? 'apikeys.profiles.excludedChannelTags' : 'apikeys.profiles.allowedChannelTags')}
+                          </h4>
+                          <p className='text-muted-foreground mt-1 text-xs'>
+                            {t(
+                              isExcludeMode
+                                ? 'apikeys.profiles.excludedChannelTagsDescription'
+                                : 'apikeys.profiles.allowedChannelTagsDescription'
+                            )}
+                          </p>
+                        </div>
+                        <FormField
+                          control={form.control}
+                          name='profile.channelTagsMatchMode'
+                          render={({ field }) => (
+                            <FormItem className='w-[180px]'>
+                              <FormLabel>{t('apikeys.profiles.allowedChannelTagsMatchMode')}</FormLabel>
+                              <FormControl>
+                                <Select value={field.value || 'any'} onValueChange={field.onChange}>
+                                  <SelectTrigger>
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value='any'>{t('apikeys.profiles.allowedChannelTagsMatchModeAny')}</SelectItem>
+                                    <SelectItem value='all'>{t('apikeys.profiles.allowedChannelTagsMatchModeAll')}</SelectItem>
+                                    <SelectItem value='none'>{t('apikeys.profiles.allowedChannelTagsMatchModeNone')}</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      </div>
+                      <FormField
+                        control={form.control}
+                        name='profile.channelTags'
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormControl>
+                              <TagsAutocompleteInput
+                                value={field.value || []}
+                                onChange={field.onChange}
+                                placeholder={t(isExcludeMode ? 'apikeys.profiles.excludedChannelTags' : 'apikeys.profiles.allowedChannelTags')}
+                                suggestions={allTags}
+                                className='h-auto min-h-9 py-1'
+                              />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {independentChannelWeights && (
+                  <div className='border-t pt-6'>
+                    <h4 className='mb-1 text-sm font-medium'>{t('apikeys.profiles.channelWeights')}</h4>
+                    <p className='text-muted-foreground mb-3 text-xs'>{t('apikeys.profiles.channelWeightsDescription')}</p>
                     <FormField
                       control={form.control}
-                      name='profile.channelTagsMatchMode'
-                      render={({ field }) => (
-                        <FormItem className='w-[180px]'>
-                          <FormLabel>{t('apikeys.profiles.allowedChannelTagsMatchMode')}</FormLabel>
-                          <FormControl>
-                            <Select value={field.value || 'any'} onValueChange={field.onChange}>
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value='any'>{t('apikeys.profiles.allowedChannelTagsMatchModeAny')}</SelectItem>
-                                <SelectItem value='all'>{t('apikeys.profiles.allowedChannelTagsMatchModeAll')}</SelectItem>
-                                <SelectItem value='none'>{t('apikeys.profiles.allowedChannelTagsMatchModeNone')}</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
+                      name='profile.channelWeights'
+                      render={({ field, fieldState }) => {
+                        const channelWeightsError = firstChannelWeightsError(fieldState.error);
+
+                        return (
+                          <FormItem>
+                            <FormControl>
+                              <ProfileChannelWeightsEditor
+                                value={field.value ?? []}
+                                onChange={field.onChange}
+                                channels={channelSummaries}
+                                isLoading={channelsLoading}
+                                portalContainer={dialogContent}
+                              />
+                            </FormControl>
+                            {channelWeightsError ? <p className='text-destructive text-sm'>{channelWeightsError}</p> : null}
+                          </FormItem>
+                        );
+                      }}
                     />
                   </div>
-                  <FormField
-                    control={form.control}
-                    name='profile.channelTags'
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormControl>
-                          <TagsAutocompleteInput
-                            value={field.value || []}
-                            onChange={field.onChange}
-                            placeholder={t(isExcludeMode ? 'apikeys.profiles.excludedChannelTags' : 'apikeys.profiles.allowedChannelTags')}
-                            suggestions={allTags}
-                            className='h-auto min-h-9 py-1'
-                          />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                </div>
+                )}
 
                 <div className='border-t pt-6'>
                   <div className='space-y-4'>
