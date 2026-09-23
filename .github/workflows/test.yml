@@ -4,12 +4,16 @@ name: Test
 on:
   push:
     branches:
+      - "main"
       - "unstable"
       - "release/**"
+      - "feature/**"
   pull_request:
     branches:
+      - "main"
       - "unstable"
       - "release/**"
+      - "feature/**"
 env:
   GO111MODULE: on
 jobs:
@@ -56,6 +60,10 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        working-directory: frontend
+        run: pnpm exec tsc -p tsconfig.app.json --noEmit
 
       - name: Test
         working-directory: frontend
