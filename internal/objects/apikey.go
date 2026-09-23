@@ -27,7 +27,29 @@ type APIKeyProfile struct {
 	ChannelTags          []string             `json:"channelTags,omitempty"`
 	ChannelTagsMatchMode ChannelTagsMatchMode `json:"channelTagsMatchMode,omitempty"`
 	ModelIDs             []string             `json:"modelIDs,omitempty"`
+
+	// IndependentChannelWeights enables the profile-scoped channel set. When
+	// true, ChannelIDs, ChannelTags and ChannelTagsMatchMode are ignored for
+	// routing; only channels listed in ChannelWeights are eligible and the
+	// listed weight replaces the channel's global OrderingWeight. The existing
+	// fields are intentionally preserved so switching the mode off restores
+	// the previous configuration.
+	IndependentChannelWeights bool                   `json:"independentChannelWeights,omitempty"`
+	ChannelWeights            []ProfileChannelWeight `json:"channelWeights,omitempty"`
 }
+
+// ProfileChannelWeight binds a channel to a profile-scoped ordering weight.
+// Weight uses the same 0-100, higher-is-preferred semantics as
+// Channel.OrderingWeight.
+type ProfileChannelWeight struct {
+	ChannelID int `json:"channelID"`
+	Weight    int `json:"weight"`
+}
+
+const (
+	ProfileChannelWeightMin = 0
+	ProfileChannelWeightMax = 100
+)
 
 // ChannelTagsMatchMode controls how profile channel tags are matched.
 // If this enum is changed, update MatchChannelTags in this file.
@@ -93,6 +115,31 @@ func MatchChannelTags(allowedTags []string, matchMode ChannelTagsMatchMode, chan
 	}
 }
 
+// UsesIndependentChannelWeights reports whether routing must use ChannelWeights
+// instead of ChannelIDs/ChannelTags.
+func (p *APIKeyProfile) UsesIndependentChannelWeights() bool {
+	return p != nil && p.IndependentChannelWeights
+}
+
+// ChannelWeightMap returns channelID → weight. The first occurrence of a
+// channel wins. It returns an empty (non-nil) map for nil profiles or empty lists.
+func (p *APIKeyProfile) ChannelWeightMap() map[int]int {
+	if p == nil {
+		return map[int]int{}
+	}
+
+	weights := make(map[int]int, len(p.ChannelWeights))
+	for _, cw := range p.ChannelWeights {
+		if _, ok := weights[cw.ChannelID]; ok {
+			continue
+		}
+
+		weights[cw.ChannelID] = cw.Weight
+	}
+
+	return weights
+}
+
 func (p *APIKeyProfile) Clone() *APIKeyProfile {
 	if p == nil {
 		return nil
@@ -134,6 +181,10 @@ func (p *APIKeyProfile) Clone() *APIKeyProfile {
 	if len(p.ModelIDs) > 0 {
 		cp.ModelIDs = make([]string, len(p.ModelIDs))
 		copy(cp.ModelIDs, p.ModelIDs)
+	}
+	if len(p.ChannelWeights) > 0 {
+		cp.ChannelWeights = make([]ProfileChannelWeight, len(p.ChannelWeights))
+		copy(cp.ChannelWeights, p.ChannelWeights)
 	}
 	if p.LoadBalanceStrategy != nil {
 		s := *p.LoadBalanceStrategy
