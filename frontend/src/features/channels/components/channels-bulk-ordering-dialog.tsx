@@ -13,31 +13,15 @@ import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { useAllChannelSummarys, useBulkUpdateChannelOrdering } from '../data/channels';
 import { ChannelSummary } from '../data/schema';
-import { parseOrderingWeightInput } from '../utils/ordering-weight';
+import {
+  calculateRelativeWeight,
+  clampOrderingWeight,
+  ORDERING_WEIGHT_MAX,
+  ORDERING_WEIGHT_MIN,
+  parseOrderingWeightInput,
+} from '../utils/ordering-weight';
 
 const WEIGHT_PRECISION = 0;
-const MIN_WEIGHT = 0;
-const MAX_WEIGHT = 100;
-
-const formatWeight = (value: number) => Math.round(value);
-
-const clampWeight = (value: number) => formatWeight(Math.min(MAX_WEIGHT, Math.max(MIN_WEIGHT, value)));
-
-const calculateRelativeWeight = (prev?: number, next?: number) => {
-  if (prev == null && next == null) {
-    return clampWeight(1);
-  }
-  if (prev == null) {
-    return clampWeight((next ?? 0) + 1);
-  }
-  if (next == null) {
-    return clampWeight(prev - 1);
-  }
-  if (prev === next) {
-    return clampWeight(prev);
-  }
-  return clampWeight(Math.floor((prev + next) / 2));
-};
 
 interface ChannelOrderingItemProps {
   channel: ChannelSummary;
@@ -67,14 +51,14 @@ const ChannelOrderingItemComponent = memo(function ChannelOrderingItemComponent(
   }, [orderingWeight]);
 
   const handleWeightBlur = () => {
-    const value = parseOrderingWeightInput(localWeight, MIN_WEIGHT, MAX_WEIGHT);
+    const value = parseOrderingWeightInput(localWeight, ORDERING_WEIGHT_MIN, ORDERING_WEIGHT_MAX);
 
     if (value === null) {
       setLocalWeight(orderingWeight.toString());
       toast.error(
         t('channels.dialogs.bulkOrdering.errors.invalidWeight', {
-          min: MIN_WEIGHT,
-          max: MAX_WEIGHT,
+          min: ORDERING_WEIGHT_MIN,
+          max: ORDERING_WEIGHT_MAX,
         })
       );
       return;
@@ -168,8 +152,8 @@ const ChannelOrderingItemComponent = memo(function ChannelOrderingItemComponent(
             type='number'
             inputMode='numeric'
             step={1}
-            min={MIN_WEIGHT}
-            max={MAX_WEIGHT}
+            min={ORDERING_WEIGHT_MIN}
+            max={ORDERING_WEIGHT_MAX}
             className='h-6 w-16 px-1 text-center text-xs'
             value={localWeight}
             onChange={(e) => setLocalWeight(e.target.value)}
@@ -233,7 +217,7 @@ export function ChannelsBulkOrderingDialog({ open, onOpenChange }: ChannelsBulkO
     if (channelsData?.edges) {
       const channels = channelsData.edges.map((edge, index) => ({
         channel: edge.node,
-        orderingWeight: clampWeight(edge.node.orderingWeight ?? channelsData.edges.length - index),
+        orderingWeight: clampOrderingWeight(edge.node.orderingWeight ?? channelsData.edges.length - index),
       }));
       // Sort by orderingWeight DESC (higher weight first)
       channels.sort((a, b) => b.orderingWeight - a.orderingWeight);
@@ -279,7 +263,7 @@ export function ChannelsBulkOrderingDialog({ open, onOpenChange }: ChannelsBulkO
   }, []);
 
   const handleWeightChange = useCallback((id: string, weight: number) => {
-    const normalizedWeight = clampWeight(weight);
+    const normalizedWeight = clampOrderingWeight(weight);
     setOrderedChannels((items) => {
       const newItems = items.map((item) => (item.channel.id === id ? { ...item, orderingWeight: normalizedWeight } : item));
       // Sort by orderingWeight DESC (higher weight first)
@@ -352,7 +336,7 @@ export function ChannelsBulkOrderingDialog({ open, onOpenChange }: ChannelsBulkO
     if (channelsData?.edges) {
       const channels = channelsData.edges.map((edge, index) => ({
         channel: edge.node,
-        orderingWeight: clampWeight(edge.node.orderingWeight ?? channelsData.edges.length - index),
+        orderingWeight: clampOrderingWeight(edge.node.orderingWeight ?? channelsData.edges.length - index),
       }));
       channels.sort((a, b) => b.orderingWeight - a.orderingWeight);
       setOrderedChannels(channels);

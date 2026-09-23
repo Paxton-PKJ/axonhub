@@ -18,7 +18,7 @@ const transpiledValidation = ts.transpileModule(validationSource, {
   },
 }).outputText;
 const validationModuleUrl = `data:text/javascript;base64,${Buffer.from(transpiledValidation).toString('base64')}`;
-const { parseOrderingWeightInput } = await import(validationModuleUrl);
+const { parseOrderingWeightInput, calculateRelativeWeight, clampOrderingWeight } = await import(validationModuleUrl);
 
 test('bulk ordering weight accepts integers from 0 through 100', () => {
   assert.equal(parseOrderingWeightInput('0', 0, 100), 0);
@@ -32,6 +32,36 @@ test('bulk ordering weight rejects invalid manual input', () => {
   assert.equal(parseOrderingWeightInput('12.5', 0, 100), null);
   assert.equal(parseOrderingWeightInput('', 0, 100), null);
   assert.equal(parseOrderingWeightInput('Infinity', 0, 100), null);
+});
+
+test('clamp ordering weight rounds and clamps into 0 through 100', () => {
+  assert.equal(clampOrderingWeight(0), 0);
+  assert.equal(clampOrderingWeight(100), 100);
+  assert.equal(clampOrderingWeight(42), 42);
+  assert.equal(clampOrderingWeight(-5), 0);
+  assert.equal(clampOrderingWeight(101), 100);
+  assert.equal(clampOrderingWeight(12.5), 13);
+  assert.equal(clampOrderingWeight(12.4), 12);
+});
+
+test('relative weight handles an empty neighbourhood', () => {
+  assert.equal(calculateRelativeWeight(undefined, undefined), 1);
+  assert.equal(calculateRelativeWeight(undefined, 10), 11);
+  assert.equal(calculateRelativeWeight(10, undefined), 9);
+});
+
+test('relative weight handles equal neighbours', () => {
+  assert.equal(calculateRelativeWeight(7, 7), 7);
+});
+
+test('relative weight splits the gap between neighbours', () => {
+  assert.equal(calculateRelativeWeight(10, 20), 15);
+  assert.equal(calculateRelativeWeight(1, 2), 1);
+});
+
+test('relative weight clamps the result into 0 through 100', () => {
+  assert.equal(calculateRelativeWeight(undefined, 100), 100);
+  assert.equal(calculateRelativeWeight(0, undefined), 0);
 });
 
 test('bulk ordering input restores invalid values without committing them', () => {
