@@ -74,6 +74,8 @@ export function ApiKeyEditTemplateDialog({ open, onOpenChange, template }: ApiKe
         channelTags: profile?.channelTags ?? null,
         channelTagsMatchMode: profile?.channelTagsMatchMode ?? 'any',
         modelIDs: profile?.modelIDs ?? null,
+        independentChannelWeights: profile?.independentChannelWeights ?? false,
+        channelWeights: profile?.channelWeights?.map((w) => ({ channelID: w.channelID, weight: w.weight })) ?? [],
         loadBalanceStrategy: normalizeRoutingPolicyValue(profile?.loadBalanceStrategy),
         traceStickyMode: normalizeRoutingPolicyValue(profile?.traceStickyMode),
         quota: profile?.quota

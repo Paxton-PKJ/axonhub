@@ -57,6 +57,8 @@ export function ApiKeyCreateTemplateDialog({ open, onOpenChange }: ApiKeyCreateT
         channelTags: [] as string[],
         channelTagsMatchMode: 'any' as const,
         modelIDs: [] as string[],
+        independentChannelWeights: false,
+        channelWeights: [] as { channelID: number; weight: number }[],
         loadBalanceStrategy: 'default',
         traceStickyMode: 'default',
         quota: null as FormValues['profile']['quota'],

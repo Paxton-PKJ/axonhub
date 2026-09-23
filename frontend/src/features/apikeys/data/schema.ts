@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { pageInfoSchema } from '@/gql/pagination';
 import { userSchema } from '@/features/users/data/schema';
+import { validateChannelWeights } from '../utils/channel-weights';
 
 // API Key Type
 export const apiKeyTypeSchema = z.enum(['user', 'service_account', 'noauth', 'personal']);
@@ -12,6 +13,12 @@ export type ApiKeyStatus = z.infer<typeof apiKeyStatusSchema>;
 
 export const channelTagsMatchModeSchema = z.enum(['any', 'all', 'none']);
 export type ChannelTagsMatchMode = z.infer<typeof channelTagsMatchModeSchema>;
+
+export const profileChannelWeightSchema = z.object({
+  channelID: z.number().int(),
+  weight: z.number().int(),
+});
+export type ProfileChannelWeight = z.infer<typeof profileChannelWeightSchema>;
 
 const channelTagsMatchModeFieldSchema = z.preprocess((value) => {
   if (value == null || value === '') {
@@ -74,6 +81,8 @@ export const apiKeySchema = z.object({
             channelTags: z.array(z.string()).optional().nullable(),
             channelTagsMatchMode: channelTagsMatchModeFieldSchema,
             modelIDs: z.array(z.string()).optional().nullable(),
+            independentChannelWeights: z.boolean().optional().nullable(),
+            channelWeights: z.array(profileChannelWeightSchema).optional().nullable(),
             loadBalanceStrategy: z.string().optional().nullable(),
             traceStickyMode: z.string().optional().nullable(),
             quota: z
@@ -176,6 +185,8 @@ export const apiKeyProfileSchema = z.object({
   channelTags: z.array(z.string()).optional().nullable(),
   channelTagsMatchMode: channelTagsMatchModeFieldSchema,
   modelIDs: z.array(z.string()).optional().nullable(),
+  independentChannelWeights: z.boolean().optional().nullable(),
+  channelWeights: z.array(profileChannelWeightSchema).optional().nullable(),
   loadBalanceStrategy: z.string().optional().nullable(),
   traceStickyMode: z.string().optional().nullable(),
   quota: z
@@ -263,6 +274,8 @@ export const updateApiKeyProfilesInputSchemaFactory = (t: (key: string) => strin
             channelTags: z.array(z.string()).optional().nullable(),
             channelTagsMatchMode: channelTagsMatchModeFieldSchema,
             modelIDs: z.array(z.string()).optional().nullable(),
+            independentChannelWeights: z.boolean().optional().nullable(),
+            channelWeights: z.array(profileChannelWeightSchema).optional().nullable(),
             loadBalanceStrategy: z.string().optional().nullable(),
             traceStickyMode: z.string().optional().nullable(),
             quota: z
@@ -309,6 +322,18 @@ export const updateApiKeyProfilesInputSchemaFactory = (t: (key: string) => strin
     )
     .superRefine((data, ctx) => {
       data.profiles.forEach((profile, index) => {
+        const channelWeightsIssue = validateChannelWeights(profile.independentChannelWeights, profile.channelWeights);
+        if (channelWeightsIssue) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: t(`apikeys.validation.channelWeights.${channelWeightsIssue.issue}`),
+            path:
+              channelWeightsIssue.index == null
+                ? ['profiles', index, 'channelWeights']
+                : ['profiles', index, 'channelWeights', channelWeightsIssue.index],
+          });
+        }
+
         const quota = profile.quota;
         if (!quota) {
           return;
@@ -364,6 +389,8 @@ export const updateApiKeyProfilesInputSchema = z.object({
       channelTags: z.array(z.string()).optional().nullable(),
       channelTagsMatchMode: channelTagsMatchModeFieldSchema,
       modelIDs: z.array(z.string()).optional().nullable(),
+      independentChannelWeights: z.boolean().optional().nullable(),
+      channelWeights: z.array(profileChannelWeightSchema).optional().nullable(),
       loadBalanceStrategy: z.string().optional().nullable(),
       traceStickyMode: z.string().optional().nullable(),
       quota: z

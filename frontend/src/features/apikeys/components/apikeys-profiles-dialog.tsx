@@ -265,6 +265,8 @@ export function ApiKeyProfilesDialog({ open, onOpenChange, onSubmit, loading = f
       channelTags: [],
       channelTagsMatchMode: 'any',
       modelIDs: [],
+      independentChannelWeights: false,
+      channelWeights: [],
       loadBalanceStrategy: 'default',
       traceStickyMode: 'default',
     });
