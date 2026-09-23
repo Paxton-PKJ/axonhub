@@ -1,0 +1,112 @@
+name: Fork Docker image (GHCR)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag or commit SHA to build
+        required: true
+        default: feature/profile-channel-priority
+      arch:
+        description: Target architecture
+        type: choice
+        options:
+          - amd64
+          - arm64
+        default: amd64
+
+concurrency:
+  group: fork-docker-${{ github.event.inputs.source_ref || github.ref_name }}-${{ github.event.inputs.arch || 'amd64' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & push (${{ github.event.inputs.arch || 'amd64' }})
+    if: github.repository == 'Paxton-PKJ/axonhub'
+    runs-on: ${{ (github.event.inputs.arch || 'amd64') == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      IMAGE: ghcr.io/paxton-pkj/axonhub
+      ARCH: ${{ github.event.inputs.arch || 'amd64' }}
+      SOURCE_REF: ${{ github.event.inputs.source_ref || github.sha }}
+      REF_NAME: ${{ github.event.inputs.source_ref || github.ref_name }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Compute version and tags
+        id: meta
+        run: |
+          BASE_VERSION=$(git ls-remote --tags --refs https://github.com/looplj/axonhub.git 'v*' \
+            | sed 's#.*refs/tags/##' | sort -V | tail -n1)
+          if [ -z "$BASE_VERSION" ]; then
+            BASE_VERSION=$(cat internal/build/VERSION 2>/dev/null || echo v0.0.0)
+          fi
+          if ! printf '%s\n' "$BASE_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'; then
+            echo "Invalid base version: $BASE_VERSION" >&2
+            exit 1
+          fi
+          VERSION="${BASE_VERSION}-fork.$(date -u +%Y%m%d)"
+          printf '%s\n' "$VERSION" > internal/build/VERSION
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          REF_SLUG=$(printf '%s' "$REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g')
+          {
+            echo "version=$VERSION"
+            echo "revision=$(git rev-parse HEAD)"
+            echo "tags<<EOF"
+            echo "${IMAGE}:${REF_SLUG}-${ARCH}"
+            echo "${IMAGE}:sha-${SHORT_SHA}-${ARCH}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/${{ env.ARCH }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/Paxton-PKJ/axonhub
+            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=fork-${{ env.ARCH }}
+          cache-to: type=gha,mode=max,scope=fork-${{ env.ARCH }}
+          provenance: false
+          sbom: false
+
+      - name: Summary
+        run: |
+          {
+            echo "### Image pushed"
+            echo ""
+            echo "Version: \`${{ steps.meta.outputs.version }}\`"
+            echo "Revision: \`${{ steps.meta.outputs.revision }}\`"
+            echo "Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo ""
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
