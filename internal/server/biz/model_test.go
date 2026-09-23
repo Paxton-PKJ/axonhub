@@ -2056,3 +2056,109 @@ func TestFindUnassociatedChannels(t *testing.T) {
 		require.Empty(t, result)
 	})
 }
+
+// TestListEnabledModels_IndependentChannelWeights_FiltersByProfileSet verifies
+// that a profile using independent channel weights lists models from the
+// weighted channel set only, ignoring leftover ChannelIDs.
+func TestListEnabledModels_IndependentChannelWeights_FiltersByProfileSet(t *testing.T) {
+	client := enttest.Open(t, dialect.SQLite, "file:ent?mode=memory&_fk=0")
+	defer client.Close()
+
+	ctx := context.Background()
+	ctx = ent.NewContext(ctx, client)
+	ctx = authz.WithTestBypass(ctx)
+
+	channelA, err := client.Channel.Create().
+		SetType(channel.TypeOpenai).
+		SetName("Weighted A").
+		SetBaseURL("https://a.profile-weights.test/v1").
+		SetCredentials(objects.ChannelCredentials{APIKey: "key-a"}).
+		SetSupportedModels([]string{"model-a"}).
+		SetDefaultTestModel("model-a").
+		SetStatus(channel.StatusEnabled).
+		Save(ctx)
+	require.NoError(t, err)
+
+	channelB, err := client.Channel.Create().
+		SetType(channel.TypeOpenai).
+		SetName("Weighted B").
+		SetBaseURL("https://b.profile-weights.test/v1").
+		SetCredentials(objects.ChannelCredentials{APIKey: "key-b"}).
+		SetSupportedModels([]string{"model-b"}).
+		SetDefaultTestModel("model-b").
+		SetStatus(channel.StatusEnabled).
+		Save(ctx)
+	require.NoError(t, err)
+
+	channelC, err := client.Channel.Create().
+		SetType(channel.TypeOpenai).
+		SetName("Leftover C").
+		SetBaseURL("https://c.profile-weights.test/v1").
+		SetCredentials(objects.ChannelCredentials{APIKey: "key-c"}).
+		SetSupportedModels([]string{"model-c"}).
+		SetDefaultTestModel("model-c").
+		SetStatus(channel.StatusEnabled).
+		Save(ctx)
+	require.NoError(t, err)
+
+	channelSvc := NewChannelServiceForTest(client)
+
+	enabledEntities, err := client.Channel.Query().
+		Where(channel.StatusEQ(channel.StatusEnabled)).
+		All(ctx)
+	require.NoError(t, err)
+
+	enabledChannels := make([]*Channel, 0, len(enabledEntities))
+	for _, entity := range enabledEntities {
+		built, buildErr := channelSvc.buildChannelWithTransformer(entity)
+		require.NoError(t, buildErr)
+
+		enabledChannels = append(enabledChannels, built)
+	}
+
+	channelSvc.SetEnabledChannelsForTest(enabledChannels)
+
+	systemSvc := &SystemService{
+		AbstractService: &AbstractService{
+			db: client,
+		},
+		Cache: xcache.NewFromConfig[ent.System](xcache.Config{Mode: xcache.ModeMemory}),
+	}
+	modelSvc := &ModelService{
+		AbstractService: &AbstractService{
+			db: client,
+		},
+		channelService: channelSvc,
+		systemService:  systemSvc,
+	}
+
+	// The leftover ChannelIDs must not narrow the independent mode.
+	ctx = contexts.WithAPIKey(ctx, &ent.APIKey{
+		Profiles: &objects.APIKeyProfiles{
+			ActiveProfile: "default",
+			Profiles: []objects.APIKeyProfile{{
+				Name:                      "default",
+				ChannelIDs:                []int{channelC.ID},
+				IndependentChannelWeights: true,
+				ChannelWeights: []objects.ProfileChannelWeight{
+					{ChannelID: channelA.ID, Weight: 80},
+					{ChannelID: channelB.ID, Weight: 20},
+				},
+			}},
+		},
+	})
+
+	// When
+	result, err := modelSvc.ListEnabledModels(ctx)
+
+	// Then
+	require.NoError(t, err)
+
+	resultMap := make(map[string]bool, len(result))
+	for _, item := range result {
+		resultMap[item.ID] = true
+	}
+
+	require.Equal(t, map[string]bool{"model-a": true, "model-b": true}, resultMap)
+	require.False(t, resultMap["model-c"], "channel outside the profile weights must not be listed")
+}

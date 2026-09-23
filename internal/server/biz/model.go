@@ -670,16 +670,25 @@ func (svc *ModelService) ListEnabledModels(ctx context.Context) ([]ModelFacade, 
 		// Key-level profile filtering (narrows further within project scope)
 		profile = apiKey.GetActiveProfile()
 
-		if profile != nil && len(profile.ChannelIDs) > 0 {
+		if profile.UsesIndependentChannelWeights() {
+			// Independent mode: ChannelIDs/ChannelTags are intentionally ignored.
+			weights := profile.ChannelWeightMap()
 			channels = lo.Filter(channels, func(ch *Channel, _ int) bool {
-				return lo.Contains(profile.ChannelIDs, ch.ID)
+				_, ok := weights[ch.ID]
+				return ok
 			})
-		}
+		} else {
+			if profile != nil && len(profile.ChannelIDs) > 0 {
+				channels = lo.Filter(channels, func(ch *Channel, _ int) bool {
+					return lo.Contains(profile.ChannelIDs, ch.ID)
+				})
+			}
 
-		if profile != nil && len(profile.ChannelTags) > 0 {
-			channels = lo.Filter(channels, func(ch *Channel, _ int) bool {
-				return profile.MatchChannelTags(ch.Tags)
-			})
+			if profile != nil && len(profile.ChannelTags) > 0 {
+				channels = lo.Filter(channels, func(ch *Channel, _ int) bool {
+					return profile.MatchChannelTags(ch.Tags)
+				})
+			}
 		}
 	}
 
