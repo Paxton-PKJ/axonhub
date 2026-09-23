@@ -18,6 +18,7 @@ import (
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/apikey"
+	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/enttest"
 	"github.com/looplj/axonhub/internal/ent/project"
 	"github.com/looplj/axonhub/internal/ent/request"
@@ -37,11 +38,15 @@ import (
 type e2eEnv struct {
 	server     *httptest.Server
 	saKey      string // service_account with read_api_keys
+	saWriter   string // service_account with read_api_keys + write_api_keys
 	saNoScope  string // service_account WITHOUT read_api_keys
 	targetID   int    // user key with a quota profile (same project)
 	targetKey  string
 	foreignID  int // user key in a different project
 	foreignKey string
+
+	chanHigh int // two channels in the target's project, for profile weights
+	chanLow  int
 }
 
 const quotaQuery = `query($id: ID, $key: String) {
@@ -114,7 +119,20 @@ func setupE2E(t *testing.T) e2eEnv {
 	}
 
 	sa := mustKey("sa", proj.ID, apikey.TypeServiceAccount, []string{string(scopes.ScopeReadAPIKeys)}, nil)
+	saWriter := mustKey("sa-writer", proj.ID, apikey.TypeServiceAccount,
+		[]string{string(scopes.ScopeReadAPIKeys), string(scopes.ScopeWriteAPIKeys)}, nil)
 	saNoScope := mustKey("sa-noscope", proj.ID, apikey.TypeServiceAccount, []string{string(scopes.ScopeWriteAPIKeys)}, nil)
+
+	mustChannel := func(name string) int {
+		return client.Channel.Create().
+			SetType(channel.TypeOpenai).SetName(name).
+			SetCredentials(objects.ChannelCredentials{APIKey: "key-" + name}).
+			SetSupportedModels([]string{"m"}).SetDefaultTestModel("m").
+			SetStatus(channel.StatusEnabled).SaveX(ctx).ID
+	}
+
+	chanHigh := mustChannel("e2e-high-priority")
+	chanLow := mustChannel("e2e-low-priority")
 
 	quotaProfile := &objects.APIKeyProfiles{
 		ActiveProfile: "Default",
@@ -179,9 +197,10 @@ func setupE2E(t *testing.T) e2eEnv {
 	t.Cleanup(srv.Close)
 
 	return e2eEnv{
-		server: srv, saKey: sa.Key, saNoScope: saNoScope.Key,
+		server: srv, saKey: sa.Key, saWriter: saWriter.Key, saNoScope: saNoScope.Key,
 		targetID: target.ID, targetKey: target.Key,
 		foreignID: foreign.ID, foreignKey: foreign.Key,
+		chanHigh: chanHigh, chanLow: chanLow,
 	}
 }
 
