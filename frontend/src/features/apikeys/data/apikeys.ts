@@ -111,6 +111,11 @@ function buildApiKeyQuery(permissions: { canViewUsers: boolean }) {
             channelTags
             channelTagsMatchMode
             modelIDs
+            independentChannelWeights
+            channelWeights {
+              channelID
+              weight
+            }
             loadBalanceStrategy
             traceStickyMode
             quota {
@@ -214,6 +219,11 @@ const UPDATE_APIKEY_PROFILES_MUTATION = `
           channelTags
           channelTagsMatchMode
           modelIDs
+          independentChannelWeights
+          channelWeights {
+            channelID
+            weight
+          }
           loadBalanceStrategy
           traceStickyMode
           quota {
@@ -323,6 +333,11 @@ const APIKEY_PROFILE_TEMPLATES_QUERY = `
             channelTags
             channelTagsMatchMode
             modelIDs
+            independentChannelWeights
+            channelWeights {
+              channelID
+              weight
+            }
             loadBalanceStrategy
             traceStickyMode
             quota {
@@ -401,6 +416,11 @@ const LOAD_APIKEY_PROFILE_TEMPLATE_MUTATION = `
           channelTags
           channelTagsMatchMode
           modelIDs
+          independentChannelWeights
+          channelWeights {
+            channelID
+            weight
+          }
           loadBalanceStrategy
           traceStickyMode
           quota {

@@ -55,6 +55,12 @@ models:
   APIKeyProfileInput:
     model:
       - github.com/looplj/axonhub/internal/objects.APIKeyProfile
+  APIKeyProfileChannelWeight:
+    model:
+      - github.com/looplj/axonhub/internal/objects.ProfileChannelWeight
+  APIKeyProfileChannelWeightInput:
+    model:
+      - github.com/looplj/axonhub/internal/objects.ProfileChannelWeight
   APIKeyQuota:
     model:
       - github.com/looplj/axonhub/internal/objects.APIKeyQuota

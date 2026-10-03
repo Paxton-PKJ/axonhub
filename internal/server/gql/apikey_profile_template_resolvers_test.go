@@ -252,6 +252,57 @@ func TestApiKeyProfileTemplate_QueryTemplates(t *testing.T) {
 	require.Equal(t, 3, conn.TotalCount)
 }
 
+const createAPIKeyProfileTemplateWithWeightsQuery = `mutation CreateWeightedTemplate($input: CreateAPIKeyProfileTemplateInput!, $profile: APIKeyProfileInput!) {
+  createApiKeyProfileTemplate(input: $input, profile: $profile) {
+    name
+    profile {
+      name
+      independentChannelWeights
+      channelWeights { channelID weight }
+    }
+  }
+}`
+
+// A template carries the same profile shape as an API key profile — its
+// `profile` argument is the very same APIKeyProfileInput — so the independent
+// channel weight fields must round trip through createApiKeyProfileTemplate too.
+// Runs through the admin executable schema (see setupAdminGraphQL) so the input
+// binding itself is under test, not just the resolver signature.
+func TestApiKeyProfileTemplate_CreateTemplate_ChannelWeights(t *testing.T) {
+	srv, ctx, client := setupAdminGraphQL(t)
+
+	fx := createProfileFixture(t, ctx, client)
+
+	resp := adminGraphQLPost(t, srv, ctx, createAPIKeyProfileTemplateWithWeightsQuery, map[string]any{
+		"input": map[string]any{
+			"name":      "weighted-template",
+			"projectID": fmt.Sprintf("gid://axonhub/Project/%d", fx.project.ID),
+		},
+		"profile": map[string]any{
+			"name":                      "Production",
+			"independentChannelWeights": true,
+			"channelWeights": []any{
+				map[string]any{"channelID": fx.highID, "weight": 70},
+				map[string]any{"channelID": fx.lowID, "weight": 30},
+			},
+		},
+	})
+
+	require.Empty(t, resp.Errors, "template create must succeed")
+	require.Equal(t, "weighted-template", resp.Data.CreateAPIKeyProfileTemplate.Name)
+
+	got := resp.Data.CreateAPIKeyProfileTemplate.Profile
+	require.NotNil(t, got)
+	// The service names the stored profile after the template.
+	require.Equal(t, "weighted-template", got.Name)
+	require.True(t, got.IndependentChannelWeights, "independent mode must survive the round trip")
+	require.Len(t, got.ChannelWeights, 2)
+	require.Equal(t, fx.highID, got.ChannelWeights[0].ChannelID)
+	require.Equal(t, 70, got.ChannelWeights[0].Weight)
+	require.Equal(t, fx.lowID, got.ChannelWeights[1].ChannelID)
+	require.Equal(t, 30, got.ChannelWeights[1].Weight)
+}
+
 func ptrStr(s string) *string {
 	return &s
 }

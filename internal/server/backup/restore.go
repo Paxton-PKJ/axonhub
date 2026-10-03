@@ -448,13 +448,17 @@ func remapAPIKeyProfilesChannelIDs(profiles *objects.APIKeyProfiles, channelIDMa
 
 	for i := range profiles.Profiles {
 		profile := &profiles.Profiles[i]
-		if len(profile.ChannelIDs) == 0 {
-			continue
-		}
-
 		for j, oldID := range profile.ChannelIDs {
 			if newID, ok := channelIDMap[oldID]; ok {
 				profile.ChannelIDs[j] = newID
+			}
+		}
+		// Independent channel weights form a routing boundary, so their channel
+		// references must follow the same remapping as ChannelIDs. Both lists are
+		// handled per profile because a profile may use either one.
+		for j, weight := range profile.ChannelWeights {
+			if newID, ok := channelIDMap[weight.ChannelID]; ok {
+				profile.ChannelWeights[j].ChannelID = newID
 			}
 		}
 	}

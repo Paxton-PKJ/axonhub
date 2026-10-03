@@ -686,3 +686,125 @@ func TestLoadTemplate_DifferentProject(t *testing.T) {
 	_, err = svc.LoadTemplate(ctx, template.ID, apiKey.ID)
 	require.Error(t, err)
 }
+
+func TestAPIKeyProfileTemplate_LoadTemplate_CarriesChannelWeights(t *testing.T) {
+	svc, client := setupTestTemplateService(t)
+	defer client.Close()
+
+	ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
+
+	testProject, err := client.Project.Create().
+		SetName(fmt.Sprintf("weights-project-%d", time.Now().UnixNano())).
+		SetDescription("weights test").
+		SetStatus(project.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	template, err := client.APIKeyProfileTemplate.Create().
+		SetName("weighted-template").
+		SetProject(testProject).
+		SetProfile(&objects.APIKeyProfile{
+			Name:                      "Weighted",
+			IndependentChannelWeights: true,
+			ChannelWeights: []objects.ProfileChannelWeight{
+				{ChannelID: 21, Weight: 70},
+				{ChannelID: 22, Weight: 30},
+			},
+		}).
+		Save(ctx)
+	require.NoError(t, err)
+
+	apiKey, err := client.APIKey.Create().
+		SetName("weighted-key").
+		SetKey(fmt.Sprintf("ah-weighted-%d", time.Now().UnixNano())).
+		SetProjectID(testProject.ID).
+		SetType(apikey.TypeUser).
+		Save(ctx)
+	require.NoError(t, err)
+
+	updatedKey, err := svc.LoadTemplate(ctx, template.ID, apiKey.ID)
+	require.NoError(t, err)
+	require.Len(t, updatedKey.Profiles.Profiles, 1)
+
+	loaded := updatedKey.Profiles.Profiles[0]
+	require.True(t, loaded.IndependentChannelWeights)
+	require.Equal(t, []objects.ProfileChannelWeight{
+		{ChannelID: 21, Weight: 70},
+		{ChannelID: 22, Weight: 30},
+	}, loaded.ChannelWeights)
+}
+
+func TestAPIKeyProfileTemplate_UpdateTemplate_SyncsChannelWeights(t *testing.T) {
+	svc, client := setupTestTemplateService(t)
+	defer client.Close()
+
+	ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
+
+	testProject, err := client.Project.Create().
+		SetName(fmt.Sprintf("sync-weights-project-%d", time.Now().UnixNano())).
+		SetDescription("sync weights test").
+		SetStatus(project.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	templateProfile := &objects.APIKeyProfile{
+		Name:                      "Weighted",
+		IndependentChannelWeights: true,
+		ChannelWeights: []objects.ProfileChannelWeight{
+			{ChannelID: 31, Weight: 60},
+		},
+	}
+
+	template, err := client.APIKeyProfileTemplate.Create().
+		SetName("sync-weighted-template").
+		SetProject(testProject).
+		SetProfile(templateProfile).
+		Save(ctx)
+	require.NoError(t, err)
+
+	templateID := template.ID
+	apiKey, err := client.APIKey.Create().
+		SetName("sync-weighted-key").
+		SetKey(fmt.Sprintf("ah-sync-weighted-%d", time.Now().UnixNano())).
+		SetProjectID(testProject.ID).
+		SetType(apikey.TypeUser).
+		SetProfiles(&objects.APIKeyProfiles{
+			ActiveProfile: "Weighted",
+			Profiles: []objects.APIKeyProfile{
+				{
+					Name:                      "Weighted",
+					TemplateID:                &templateID,
+					TemplateName:              template.Name,
+					IndependentChannelWeights: true,
+					ChannelWeights: []objects.ProfileChannelWeight{
+						{ChannelID: 31, Weight: 60},
+					},
+				},
+			},
+		}).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = svc.UpdateTemplate(ctx, template.ID, ent.UpdateAPIKeyProfileTemplateInput{}, &objects.APIKeyProfile{
+		Name:                      "Weighted",
+		IndependentChannelWeights: true,
+		ChannelWeights: []objects.ProfileChannelWeight{
+			{ChannelID: 31, Weight: 5},
+			{ChannelID: 32, Weight: 95},
+		},
+	})
+	require.NoError(t, err)
+
+	updated, err := client.APIKey.Get(ctx, apiKey.ID)
+	require.NoError(t, err)
+	require.Len(t, updated.Profiles.Profiles, 1)
+
+	profile := updated.Profiles.Profiles[0]
+	require.True(t, profile.IndependentChannelWeights)
+	require.Equal(t, []objects.ProfileChannelWeight{
+		{ChannelID: 31, Weight: 5},
+		{ChannelID: 32, Weight: 95},
+	}, profile.ChannelWeights)
+	require.NotNil(t, profile.TemplateID)
+	require.Equal(t, template.ID, *profile.TemplateID)
+}

@@ -285,6 +285,371 @@ func TestBackupService_Restore_RemapChannelIDsInModelSettingsAndAPIKeyProfiles(t
 	require.Equal(t, []int{restoredChannel.ID}, restoredKey.Profiles.Profiles[0].ChannelIDs)
 }
 
+func TestBackupService_Restore_RemapProfileChannelWeights(t *testing.T) {
+	client, service, ctx := setupBackupTest(t)
+	defer client.Close()
+
+	createBackupTestProject(t, client, ctx, "Default", "Default Project")
+
+	oldChannelIDs := []int{123, 124}
+	backupData := BackupData{
+		Version: BackupVersion,
+		Channels: []*BackupChannel{
+			{
+				Channel: ent.Channel{
+					ID:      oldChannelIDs[0],
+					Type:    channel.TypeOpenai,
+					Name:    "weights-a",
+					BaseURL: "https://api.example.com",
+					Status:  channel.StatusEnabled,
+				},
+				Credentials: objects.ChannelCredentials{APIKey: "backup-api-key-a"},
+			},
+			{
+				Channel: ent.Channel{
+					ID:      oldChannelIDs[1],
+					Type:    channel.TypeOpenai,
+					Name:    "weights-b",
+					BaseURL: "https://api.example.com",
+					Status:  channel.StatusEnabled,
+				},
+				Credentials: objects.ChannelCredentials{APIKey: "backup-api-key-b"},
+			},
+		},
+		APIKeys: []*BackupAPIKey{
+			{
+				APIKey: ent.APIKey{
+					Key:    "sk-weights-key",
+					Name:   "Weights API Key",
+					Type:   "user",
+					Status: "enabled",
+					Scopes: []string{"chat"},
+					Profiles: &objects.APIKeyProfiles{
+						ActiveProfile: "default",
+						Profiles: []objects.APIKeyProfile{
+							{
+								Name:                      "default",
+								IndependentChannelWeights: true,
+								ChannelWeights: []objects.ProfileChannelWeight{
+									{ChannelID: oldChannelIDs[0], Weight: 80},
+									{ChannelID: oldChannelIDs[1], Weight: 20},
+								},
+							},
+						},
+					},
+				},
+				ProjectName: "Default",
+			},
+		},
+	}
+
+	data, err := json.MarshalIndent(backupData, "", "  ")
+	require.NoError(t, err)
+
+	err = service.Restore(ctx, data, RestoreOptions{
+		IncludeChannels:         true,
+		IncludeAPIKeys:          true,
+		ChannelConflictStrategy: ConflictStrategyOverwrite,
+		APIKeyConflictStrategy:  ConflictStrategyOverwrite,
+	})
+	require.NoError(t, err)
+
+	restoredChannelA, err := client.Channel.Query().Where(channel.Name("weights-a")).First(ctx)
+	require.NoError(t, err)
+	require.NotEqual(t, oldChannelIDs[0], restoredChannelA.ID)
+
+	restoredChannelB, err := client.Channel.Query().Where(channel.Name("weights-b")).First(ctx)
+	require.NoError(t, err)
+	require.NotEqual(t, oldChannelIDs[1], restoredChannelB.ID)
+
+	t.Logf("remapped channel weights: %d -> %d, %d -> %d",
+		oldChannelIDs[0], restoredChannelA.ID, oldChannelIDs[1], restoredChannelB.ID)
+
+	restoredKey, err := client.APIKey.Query().Where(apikey.Key("sk-weights-key")).First(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, restoredKey.Profiles)
+	require.Len(t, restoredKey.Profiles.Profiles, 1)
+
+	profile := restoredKey.Profiles.Profiles[0]
+	require.True(t, profile.IndependentChannelWeights)
+	require.Empty(t, profile.ChannelIDs)
+	require.Equal(t, []objects.ProfileChannelWeight{
+		{ChannelID: restoredChannelA.ID, Weight: 80},
+		{ChannelID: restoredChannelB.ID, Weight: 20},
+	}, profile.ChannelWeights)
+}
+
+func TestBackupService_Restore_RemapProfileChannelWeights_KeepsUnmapped(t *testing.T) {
+	client, service, ctx := setupBackupTest(t)
+	defer client.Close()
+
+	createBackupTestProject(t, client, ctx, "Default", "Default Project")
+
+	oldChannelID := 123
+	unmappedChannelID := 999
+	backupData := BackupData{
+		Version: BackupVersion,
+		Channels: []*BackupChannel{
+			{
+				Channel: ent.Channel{
+					ID:      oldChannelID,
+					Type:    channel.TypeOpenai,
+					Name:    "weights-unmapped",
+					BaseURL: "https://api.example.com",
+					Status:  channel.StatusEnabled,
+				},
+				Credentials: objects.ChannelCredentials{APIKey: "backup-api-key"},
+			},
+		},
+		APIKeys: []*BackupAPIKey{
+			{
+				APIKey: ent.APIKey{
+					Key:    "sk-weights-unmapped-key",
+					Name:   "Weights Unmapped API Key",
+					Type:   "user",
+					Status: "enabled",
+					Scopes: []string{"chat"},
+					Profiles: &objects.APIKeyProfiles{
+						ActiveProfile: "default",
+						Profiles: []objects.APIKeyProfile{
+							{
+								Name:                      "default",
+								IndependentChannelWeights: true,
+								ChannelWeights: []objects.ProfileChannelWeight{
+									{ChannelID: oldChannelID, Weight: 50},
+									{ChannelID: unmappedChannelID, Weight: 10},
+								},
+							},
+						},
+					},
+				},
+				ProjectName: "Default",
+			},
+		},
+	}
+
+	data, err := json.MarshalIndent(backupData, "", "  ")
+	require.NoError(t, err)
+
+	err = service.Restore(ctx, data, RestoreOptions{
+		IncludeChannels:         true,
+		IncludeAPIKeys:          true,
+		ChannelConflictStrategy: ConflictStrategyOverwrite,
+		APIKeyConflictStrategy:  ConflictStrategyOverwrite,
+	})
+	require.NoError(t, err)
+
+	restoredChannel, err := client.Channel.Query().Where(channel.Name("weights-unmapped")).First(ctx)
+	require.NoError(t, err)
+	require.NotEqual(t, oldChannelID, restoredChannel.ID)
+
+	restoredKey, err := client.APIKey.Query().Where(apikey.Key("sk-weights-unmapped-key")).First(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, restoredKey.Profiles)
+	require.Len(t, restoredKey.Profiles.Profiles, 1)
+	require.Equal(t, []objects.ProfileChannelWeight{
+		{ChannelID: restoredChannel.ID, Weight: 50},
+		{ChannelID: unmappedChannelID, Weight: 10},
+	}, restoredKey.Profiles.Profiles[0].ChannelWeights)
+}
+
+func TestBackupService_Restore_RemapProfileChannelIDsAndWeightsTogether(t *testing.T) {
+	client, service, ctx := setupBackupTest(t)
+	defer client.Close()
+
+	createBackupTestProject(t, client, ctx, "Default", "Default Project")
+
+	oldChannelID := 123
+	oldWeightedChannelID := 124
+	backupData := BackupData{
+		Version: BackupVersion,
+		Channels: []*BackupChannel{
+			{
+				Channel: ent.Channel{
+					ID:      oldChannelID,
+					Type:    channel.TypeOpenai,
+					Name:    "both-a",
+					BaseURL: "https://api.example.com",
+					Status:  channel.StatusEnabled,
+				},
+				Credentials: objects.ChannelCredentials{APIKey: "backup-api-key-a"},
+			},
+			{
+				Channel: ent.Channel{
+					ID:      oldWeightedChannelID,
+					Type:    channel.TypeOpenai,
+					Name:    "both-b",
+					BaseURL: "https://api.example.com",
+					Status:  channel.StatusEnabled,
+				},
+				Credentials: objects.ChannelCredentials{APIKey: "backup-api-key-b"},
+			},
+		},
+		APIKeys: []*BackupAPIKey{
+			{
+				APIKey: ent.APIKey{
+					Key:    "sk-both-key",
+					Name:   "Both Lists API Key",
+					Type:   "user",
+					Status: "enabled",
+					Scopes: []string{"chat"},
+					Profiles: &objects.APIKeyProfiles{
+						ActiveProfile: "default",
+						Profiles: []objects.APIKeyProfile{
+							{
+								Name:       "default",
+								ChannelIDs: []int{oldChannelID},
+								ChannelWeights: []objects.ProfileChannelWeight{
+									{ChannelID: oldWeightedChannelID, Weight: 30},
+								},
+							},
+						},
+					},
+				},
+				ProjectName: "Default",
+			},
+		},
+	}
+
+	data, err := json.MarshalIndent(backupData, "", "  ")
+	require.NoError(t, err)
+
+	err = service.Restore(ctx, data, RestoreOptions{
+		IncludeChannels:         true,
+		IncludeAPIKeys:          true,
+		ChannelConflictStrategy: ConflictStrategyOverwrite,
+		APIKeyConflictStrategy:  ConflictStrategyOverwrite,
+	})
+	require.NoError(t, err)
+
+	restoredChannel, err := client.Channel.Query().Where(channel.Name("both-a")).First(ctx)
+	require.NoError(t, err)
+	require.NotEqual(t, oldChannelID, restoredChannel.ID)
+
+	restoredWeightedChannel, err := client.Channel.Query().Where(channel.Name("both-b")).First(ctx)
+	require.NoError(t, err)
+	require.NotEqual(t, oldWeightedChannelID, restoredWeightedChannel.ID)
+
+	restoredKey, err := client.APIKey.Query().Where(apikey.Key("sk-both-key")).First(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, restoredKey.Profiles)
+	require.Len(t, restoredKey.Profiles.Profiles, 1)
+
+	profile := restoredKey.Profiles.Profiles[0]
+	require.Equal(t, []int{restoredChannel.ID}, profile.ChannelIDs)
+	require.Equal(t, []objects.ProfileChannelWeight{
+		{ChannelID: restoredWeightedChannel.ID, Weight: 30},
+	}, profile.ChannelWeights)
+}
+
+func TestRemapAPIKeyProfilesChannelIDs_ChannelWeights(t *testing.T) {
+	channelIDMap := map[int]int{123: 7, 124: 8}
+
+	tests := []struct {
+		name         string
+		profiles     *objects.APIKeyProfiles
+		channelIDMap map[int]int
+		expected     *objects.APIKeyProfiles
+	}{
+		{
+			name: "weights only without channel ids",
+			profiles: &objects.APIKeyProfiles{
+				Profiles: []objects.APIKeyProfile{
+					{
+						Name:           "default",
+						ChannelWeights: []objects.ProfileChannelWeight{{ChannelID: 123, Weight: 80}},
+					},
+				},
+			},
+			channelIDMap: channelIDMap,
+			expected: &objects.APIKeyProfiles{
+				Profiles: []objects.APIKeyProfile{
+					{
+						Name:           "default",
+						ChannelWeights: []objects.ProfileChannelWeight{{ChannelID: 7, Weight: 80}},
+					},
+				},
+			},
+		},
+		{
+			name: "channel ids only",
+			profiles: &objects.APIKeyProfiles{
+				Profiles: []objects.APIKeyProfile{
+					{Name: "default", ChannelIDs: []int{123, 124}},
+				},
+			},
+			channelIDMap: channelIDMap,
+			expected: &objects.APIKeyProfiles{
+				Profiles: []objects.APIKeyProfile{
+					{Name: "default", ChannelIDs: []int{7, 8}},
+				},
+			},
+		},
+		{
+			name: "both lists keep unmapped ids and weights untouched",
+			profiles: &objects.APIKeyProfiles{
+				Profiles: []objects.APIKeyProfile{
+					{
+						Name:                      "default",
+						IndependentChannelWeights: true,
+						ChannelIDs:                []int{123, 999},
+						ChannelWeights: []objects.ProfileChannelWeight{
+							{ChannelID: 999, Weight: 50},
+							{ChannelID: 124, Weight: 20},
+						},
+					},
+				},
+			},
+			channelIDMap: channelIDMap,
+			expected: &objects.APIKeyProfiles{
+				Profiles: []objects.APIKeyProfile{
+					{
+						Name:                      "default",
+						IndependentChannelWeights: true,
+						ChannelIDs:                []int{7, 999},
+						ChannelWeights: []objects.ProfileChannelWeight{
+							{ChannelID: 999, Weight: 50},
+							{ChannelID: 8, Weight: 20},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "empty channel id map is a no-op",
+			profiles: &objects.APIKeyProfiles{
+				Profiles: []objects.APIKeyProfile{
+					{
+						Name:           "default",
+						ChannelWeights: []objects.ProfileChannelWeight{{ChannelID: 123, Weight: 80}},
+					},
+				},
+			},
+			channelIDMap: map[int]int{},
+			expected: &objects.APIKeyProfiles{
+				Profiles: []objects.APIKeyProfile{
+					{
+						Name:           "default",
+						ChannelWeights: []objects.ProfileChannelWeight{{ChannelID: 123, Weight: 80}},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remapAPIKeyProfilesChannelIDs(tt.profiles, tt.channelIDMap)
+
+			require.Equal(t, tt.expected, tt.profiles)
+		})
+	}
+
+	require.NotPanics(t, func() {
+		remapAPIKeyProfilesChannelIDs(nil, channelIDMap)
+	})
+}
+
 func TestBackupService_Restore_RemapChannelIDsInProjectProfiles(t *testing.T) {
 	client, service, ctx := setupBackupTest(t)
 	defer client.Close()

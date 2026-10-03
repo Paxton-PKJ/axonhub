@@ -25,6 +25,8 @@ type APIKeyProfile {
   quota: APIKeyQuota
   loadBalanceStrategy: String
   traceStickyMode: String
+  independentChannelWeights: Boolean!
+  channelWeights: [APIKeyProfileChannelWeight!]
 }
 
 type APIKeyQuota {
@@ -60,6 +62,20 @@ enum ChannelTagsMatchMode {
   none
 }
 
+"""
+APIKeyProfileChannelWeight binds a channel to a profile-scoped ordering weight.
+Weight uses the same 0-100, higher-is-preferred semantics as Channel.orderingWeight.
+"""
+type APIKeyProfileChannelWeight {
+  channelID: Int!
+  weight: Int!
+}
+
+input APIKeyProfileChannelWeightInput {
+  channelID: Int!
+  weight: Int!
+}
+
 enum APIKeyQuotaPeriodType {
   all_time
   past_duration
@@ -92,6 +108,8 @@ input APIKeyProfileInput {
   quota: APIKeyQuotaInput
   loadBalanceStrategy: String
   traceStickyMode: String
+  independentChannelWeights: Boolean
+  channelWeights: [APIKeyProfileChannelWeightInput!]
 }
 
 input APIKeyQuotaInput {

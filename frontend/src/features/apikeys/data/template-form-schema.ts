@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { validateChannelWeights } from '../utils/channel-weights';
+import { profileChannelWeightSchema } from './schema';
 
 export const formSchemaFactory = (t: (key: string) => string) =>
   z
@@ -17,6 +19,8 @@ export const formSchemaFactory = (t: (key: string) => string) =>
         channelTags: z.array(z.string()).optional().nullable(),
         channelTagsMatchMode: z.enum(['any', 'all', 'none']),
         modelIDs: z.array(z.string()).optional().nullable(),
+        independentChannelWeights: z.boolean().optional().nullable(),
+        channelWeights: z.array(profileChannelWeightSchema).optional().nullable(),
         loadBalanceStrategy: z.string().optional().nullable(),
         traceStickyMode: z.string().optional().nullable(),
         quota: z
@@ -46,6 +50,18 @@ export const formSchemaFactory = (t: (key: string) => string) =>
       }),
     })
     .superRefine((data, ctx) => {
+      const channelWeightsIssue = validateChannelWeights(data.profile?.independentChannelWeights, data.profile?.channelWeights);
+      if (channelWeightsIssue) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: t(`apikeys.validation.channelWeights.${channelWeightsIssue.issue}`),
+          path:
+            channelWeightsIssue.index == null
+              ? ['profile', 'channelWeights']
+              : ['profile', 'channelWeights', channelWeightsIssue.index],
+        });
+      }
+
       const quota = data.profile?.quota;
       if (!quota) return;
 

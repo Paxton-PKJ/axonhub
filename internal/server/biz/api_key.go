@@ -769,6 +769,9 @@ func normalizeProfileForComparison(profile *objects.APIKeyProfile) *objects.APIK
 	if result.ModelIDs == nil {
 		result.ModelIDs = []string{}
 	}
+	if result.ChannelWeights == nil {
+		result.ChannelWeights = []objects.ProfileChannelWeight{}
+	}
 	result.ChannelTagsMatchMode = result.ChannelTagsMatchMode.OrDefault()
 	loadBalanceStrategy := objects.RoutingPolicyDefault
 	if result.LoadBalanceStrategy != nil {
@@ -822,7 +825,7 @@ func validateProfileFilters(profiles []objects.APIKeyProfile) error {
 		}
 	}
 
-	return nil
+	return validateProfileChannelWeights(profiles)
 }
 
 func validateProfileRoutingPolicies(profiles []objects.APIKeyProfile) error {

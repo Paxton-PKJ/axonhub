@@ -492,6 +492,8 @@ input APIKeyProfileInput {
   quota: APIKeyQuotaInput
   loadBalanceStrategy: String
   traceStickyMode: String
+  independentChannelWeights: Boolean
+  channelWeights: [APIKeyProfileChannelWeightInput!]
 }
 
 input UpdateProjectProfilesInput {
@@ -539,12 +541,28 @@ type APIKeyProfile {
   quota: APIKeyQuota
   loadBalanceStrategy: String
   traceStickyMode: String
+  independentChannelWeights: Boolean!
+  channelWeights: [APIKeyProfileChannelWeight!]
 }
 
 enum ChannelTagsMatchMode {
   any
   all
   none
+}
+
+"""
+APIKeyProfileChannelWeight binds a channel to a profile-scoped ordering weight.
+Weight uses the same 0-100, higher-is-preferred semantics as Channel.orderingWeight.
+"""
+type APIKeyProfileChannelWeight {
+  channelID: Int!
+  weight: Int!
+}
+
+input APIKeyProfileChannelWeightInput {
+  channelID: Int!
+  weight: Int!
 }
 
 # ApiKeyProfileTemplate uses the Ent-generated type and input types from ent.graphql

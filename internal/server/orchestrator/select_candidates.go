@@ -41,12 +41,18 @@ func selectCandidates(inbound *PersistentInboundTransformer, quotaProvider Provi
 
 		// Key-level profile filtering (narrows further within project scope)
 		if profile := inbound.state.APIKey.GetActiveProfile(); profile != nil {
-			if len(profile.ChannelIDs) > 0 {
-				selector = WithSelectedChannelsSelector(selector, profile.ChannelIDs)
-			}
+			if profile.UsesIndependentChannelWeights() {
+				// Independent mode: the profile owns both the channel set and the
+				// per-channel weights; ChannelIDs/ChannelTags are intentionally ignored.
+				selector = WithProfileChannelWeightsSelector(selector, profile.ChannelWeightMap())
+			} else {
+				if len(profile.ChannelIDs) > 0 {
+					selector = WithSelectedChannelsSelector(selector, profile.ChannelIDs)
+				}
 
-			if len(profile.ChannelTags) > 0 {
-				selector = WithChannelTagsFilterSelector(selector, profile.ChannelTags, profile.ChannelTagsMatchMode)
+				if len(profile.ChannelTags) > 0 {
+					selector = WithChannelTagsFilterSelector(selector, profile.ChannelTags, profile.ChannelTagsMatchMode)
+				}
 			}
 		}
 

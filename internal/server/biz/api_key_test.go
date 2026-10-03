@@ -1472,3 +1472,141 @@ func TestValidateAllowedIPs(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateAPIKeyProfiles_IndependentChannelWeights_RoundTrip(t *testing.T) {
+	apiKeyService, client := setupTestAPIKeyService(t, xcache.Config{Mode: xcache.ModeMemory})
+	defer apiKeyService.Stop()
+	defer client.Close()
+
+	ctx := ent.NewContext(context.Background(), client)
+	ctx = authz.WithTestBypass(ctx)
+
+	hashedPassword, err := HashPassword("test-password")
+	require.NoError(t, err)
+
+	testUser, err := client.User.Create().
+		SetEmail(fmt.Sprintf("test-%d@example.com", time.Now().UnixNano())).
+		SetPassword(hashedPassword).
+		SetFirstName("Test").
+		SetLastName("User").
+		SetStatus(user.StatusActivated).
+		Save(ctx)
+	require.NoError(t, err)
+
+	projectName := uuid.NewString()
+	testProject, err := client.Project.Create().
+		SetName(projectName).
+		SetDescription(projectName).
+		SetStatus(project.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.UserProject.Create().
+		SetUserID(testUser.ID).
+		SetProjectID(testProject.ID).
+		SetIsOwner(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	ctxWithUser := contexts.WithUser(ctx, testUser)
+
+	apiKey, err := apiKeyService.CreateAPIKey(ctxWithUser, ent.CreateAPIKeyInput{
+		Name:      "Independent weights key",
+		ProjectID: testProject.ID,
+	})
+	require.NoError(t, err)
+
+	profiles := objects.APIKeyProfiles{
+		ActiveProfile: "production",
+		Profiles: []objects.APIKeyProfile{
+			{
+				Name:                      "production",
+				IndependentChannelWeights: true,
+				ChannelWeights: []objects.ProfileChannelWeight{
+					{ChannelID: 11, Weight: 80},
+					{ChannelID: 12, Weight: 20},
+				},
+				// Legacy selectors stay on the profile but are ignored while the
+				// independent mode is enabled.
+				ChannelIDs:           []int{13},
+				ChannelTags:          []string{"x"},
+				ChannelTagsMatchMode: objects.ChannelTagsMatchModeAll,
+			},
+		},
+	}
+
+	_, err = apiKeyService.UpdateAPIKeyProfiles(ctx, apiKey.ID, profiles)
+	require.NoError(t, err)
+
+	stored, err := client.APIKey.Get(ctx, apiKey.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored.Profiles)
+	require.Len(t, stored.Profiles.Profiles, 1)
+
+	profile := stored.Profiles.Profiles[0]
+	require.True(t, profile.IndependentChannelWeights)
+	require.Equal(t, []objects.ProfileChannelWeight{
+		{ChannelID: 11, Weight: 80},
+		{ChannelID: 12, Weight: 20},
+	}, profile.ChannelWeights)
+	require.Equal(t, []int{13}, profile.ChannelIDs)
+	require.Equal(t, []string{"x"}, profile.ChannelTags)
+	require.Equal(t, objects.ChannelTagsMatchModeAll, profile.ChannelTagsMatchMode)
+	require.Equal(t, map[int]int{11: 80, 12: 20}, profile.ChannelWeightMap())
+}
+
+func TestUpdateAPIKeyProfiles_IndependentChannelWeights_RejectsEmpty(t *testing.T) {
+	apiKeyService, client := setupTestAPIKeyService(t, xcache.Config{Mode: xcache.ModeMemory})
+	defer apiKeyService.Stop()
+	defer client.Close()
+
+	ctx := ent.NewContext(context.Background(), client)
+	ctx = authz.WithTestBypass(ctx)
+
+	hashedPassword, err := HashPassword("test-password")
+	require.NoError(t, err)
+
+	testUser, err := client.User.Create().
+		SetEmail(fmt.Sprintf("test-%d@example.com", time.Now().UnixNano())).
+		SetPassword(hashedPassword).
+		SetFirstName("Test").
+		SetLastName("User").
+		SetStatus(user.StatusActivated).
+		Save(ctx)
+	require.NoError(t, err)
+
+	projectName := uuid.NewString()
+	testProject, err := client.Project.Create().
+		SetName(projectName).
+		SetDescription(projectName).
+		SetStatus(project.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.UserProject.Create().
+		SetUserID(testUser.ID).
+		SetProjectID(testProject.ID).
+		SetIsOwner(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	ctxWithUser := contexts.WithUser(ctx, testUser)
+
+	apiKey, err := apiKeyService.CreateAPIKey(ctxWithUser, ent.CreateAPIKeyInput{
+		Name:      "Independent weights empty key",
+		ProjectID: testProject.ID,
+	})
+	require.NoError(t, err)
+
+	_, err = apiKeyService.UpdateAPIKeyProfiles(ctx, apiKey.ID, objects.APIKeyProfiles{
+		ActiveProfile: "production",
+		Profiles: []objects.APIKeyProfile{
+			{
+				Name:                      "production",
+				IndependentChannelWeights: true,
+			},
+		},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "independent channel weights requires at least one channel")
+}

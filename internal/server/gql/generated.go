@@ -143,17 +143,24 @@ type ComplexityRoot struct {
 	}
 
 	APIKeyProfile struct {
-		ChannelIDs           func(childComplexity int) int
-		ChannelTags          func(childComplexity int) int
-		ChannelTagsMatchMode func(childComplexity int) int
-		LoadBalanceStrategy  func(childComplexity int) int
-		ModelIDs             func(childComplexity int) int
-		ModelMappings        func(childComplexity int) int
-		Name                 func(childComplexity int) int
-		Quota                func(childComplexity int) int
-		TemplateID           func(childComplexity int) int
-		TemplateName         func(childComplexity int) int
-		TraceStickyMode      func(childComplexity int) int
+		ChannelIDs                func(childComplexity int) int
+		ChannelTags               func(childComplexity int) int
+		ChannelTagsMatchMode      func(childComplexity int) int
+		ChannelWeights            func(childComplexity int) int
+		IndependentChannelWeights func(childComplexity int) int
+		LoadBalanceStrategy       func(childComplexity int) int
+		ModelIDs                  func(childComplexity int) int
+		ModelMappings             func(childComplexity int) int
+		Name                      func(childComplexity int) int
+		Quota                     func(childComplexity int) int
+		TemplateID                func(childComplexity int) int
+		TemplateName              func(childComplexity int) int
+		TraceStickyMode           func(childComplexity int) int
+	}
+
+	APIKeyProfileChannelWeight struct {
+		ChannelID func(childComplexity int) int
+		Weight    func(childComplexity int) int
 	}
 
 	APIKeyProfileQuotaUsage struct {
@@ -2789,6 +2796,18 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.APIKeyProfile.ChannelTagsMatchMode(childComplexity), true
+	case "APIKeyProfile.channelWeights":
+		if e.complexity.APIKeyProfile.ChannelWeights == nil {
+			break
+		}
+
+		return e.complexity.APIKeyProfile.ChannelWeights(childComplexity), true
+	case "APIKeyProfile.independentChannelWeights":
+		if e.complexity.APIKeyProfile.IndependentChannelWeights == nil {
+			break
+		}
+
+		return e.complexity.APIKeyProfile.IndependentChannelWeights(childComplexity), true
 	case "APIKeyProfile.loadBalanceStrategy":
 		if e.complexity.APIKeyProfile.LoadBalanceStrategy == nil {
 			break
@@ -2837,6 +2856,19 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.APIKeyProfile.TraceStickyMode(childComplexity), true
+
+	case "APIKeyProfileChannelWeight.channelID":
+		if e.complexity.APIKeyProfileChannelWeight.ChannelID == nil {
+			break
+		}
+
+		return e.complexity.APIKeyProfileChannelWeight.ChannelID(childComplexity), true
+	case "APIKeyProfileChannelWeight.weight":
+		if e.complexity.APIKeyProfileChannelWeight.Weight == nil {
+			break
+		}
+
+		return e.complexity.APIKeyProfileChannelWeight.Weight(childComplexity), true
 
 	case "APIKeyProfileQuotaUsage.profileName":
 		if e.complexity.APIKeyProfileQuotaUsage.ProfileName == nil {
@@ -11814,6 +11846,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 	inputUnmarshalMap := graphql.BuildUnmarshalerMap(
 		ec.unmarshalInputAPIKeyAutoDisableRuleInput,
 		ec.unmarshalInputAPIKeyOrder,
+		ec.unmarshalInputAPIKeyProfileChannelWeightInput,
 		ec.unmarshalInputAPIKeyProfileInput,
 		ec.unmarshalInputAPIKeyProfileTemplateOrder,
 		ec.unmarshalInputAPIKeyProfileTemplateWhereInput,
@@ -16928,6 +16961,128 @@ func (ec *executionContext) fieldContext_APIKeyProfile_traceStickyMode(_ context
 	return fc, nil
 }
 
+func (ec *executionContext) _APIKeyProfile_independentChannelWeights(ctx context.Context, field graphql.CollectedField, obj *objects.APIKeyProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_APIKeyProfile_independentChannelWeights,
+		func(ctx context.Context) (any, error) {
+			return obj.IndependentChannelWeights, nil
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_APIKeyProfile_independentChannelWeights(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "APIKeyProfile",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _APIKeyProfile_channelWeights(ctx context.Context, field graphql.CollectedField, obj *objects.APIKeyProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_APIKeyProfile_channelWeights,
+		func(ctx context.Context) (any, error) {
+			return obj.ChannelWeights, nil
+		},
+		nil,
+		ec.marshalOAPIKeyProfileChannelWeight2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐProfileChannelWeightᚄ,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_APIKeyProfile_channelWeights(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "APIKeyProfile",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "channelID":
+				return ec.fieldContext_APIKeyProfileChannelWeight_channelID(ctx, field)
+			case "weight":
+				return ec.fieldContext_APIKeyProfileChannelWeight_weight(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type APIKeyProfileChannelWeight", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _APIKeyProfileChannelWeight_channelID(ctx context.Context, field graphql.CollectedField, obj *objects.ProfileChannelWeight) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_APIKeyProfileChannelWeight_channelID,
+		func(ctx context.Context) (any, error) {
+			return obj.ChannelID, nil
+		},
+		nil,
+		ec.marshalNInt2int,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_APIKeyProfileChannelWeight_channelID(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "APIKeyProfileChannelWeight",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _APIKeyProfileChannelWeight_weight(ctx context.Context, field graphql.CollectedField, obj *objects.ProfileChannelWeight) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_APIKeyProfileChannelWeight_weight,
+		func(ctx context.Context) (any, error) {
+			return obj.Weight, nil
+		},
+		nil,
+		ec.marshalNInt2int,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_APIKeyProfileChannelWeight_weight(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "APIKeyProfileChannelWeight",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _APIKeyProfileQuotaUsage_profileName(ctx context.Context, field graphql.CollectedField, obj *APIKeyProfileQuotaUsage) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -17288,6 +17443,10 @@ func (ec *executionContext) fieldContext_APIKeyProfileTemplate_profile(_ context
 				return ec.fieldContext_APIKeyProfile_loadBalanceStrategy(ctx, field)
 			case "traceStickyMode":
 				return ec.fieldContext_APIKeyProfile_traceStickyMode(ctx, field)
+			case "independentChannelWeights":
+				return ec.fieldContext_APIKeyProfile_independentChannelWeights(ctx, field)
+			case "channelWeights":
+				return ec.fieldContext_APIKeyProfile_channelWeights(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type APIKeyProfile", field.Name)
 		},
@@ -17645,6 +17804,10 @@ func (ec *executionContext) fieldContext_APIKeyProfiles_profiles(_ context.Conte
 				return ec.fieldContext_APIKeyProfile_loadBalanceStrategy(ctx, field)
 			case "traceStickyMode":
 				return ec.fieldContext_APIKeyProfile_traceStickyMode(ctx, field)
+			case "independentChannelWeights":
+				return ec.fieldContext_APIKeyProfile_independentChannelWeights(ctx, field)
+			case "channelWeights":
+				return ec.fieldContext_APIKeyProfile_channelWeights(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type APIKeyProfile", field.Name)
 		},
@@ -64829,6 +64992,40 @@ func (ec *executionContext) unmarshalInputAPIKeyOrder(ctx context.Context, obj a
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputAPIKeyProfileChannelWeightInput(ctx context.Context, obj any) (objects.ProfileChannelWeight, error) {
+	var it objects.ProfileChannelWeight
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"channelID", "weight"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "channelID":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("channelID"))
+			data, err := ec.unmarshalNInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ChannelID = data
+		case "weight":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("weight"))
+			data, err := ec.unmarshalNInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Weight = data
+		}
+	}
+
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputAPIKeyProfileInput(ctx context.Context, obj any) (objects.APIKeyProfile, error) {
 	var it objects.APIKeyProfile
 	asMap := map[string]any{}
@@ -64836,7 +65033,7 @@ func (ec *executionContext) unmarshalInputAPIKeyProfileInput(ctx context.Context
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"name", "templateID", "templateName", "modelMappings", "channelIDs", "channelTags", "channelTagsMatchMode", "modelIDs", "quota", "loadBalanceStrategy", "traceStickyMode"}
+	fieldsInOrder := [...]string{"name", "templateID", "templateName", "modelMappings", "channelIDs", "channelTags", "channelTagsMatchMode", "modelIDs", "quota", "loadBalanceStrategy", "traceStickyMode", "independentChannelWeights", "channelWeights"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -64920,6 +65117,20 @@ func (ec *executionContext) unmarshalInputAPIKeyProfileInput(ctx context.Context
 				return it, err
 			}
 			it.TraceStickyMode = data
+		case "independentChannelWeights":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("independentChannelWeights"))
+			data, err := ec.unmarshalOBoolean2bool(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.IndependentChannelWeights = data
+		case "channelWeights":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("channelWeights"))
+			data, err := ec.unmarshalOAPIKeyProfileChannelWeightInput2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐProfileChannelWeightᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ChannelWeights = data
 		}
 	}
 
@@ -92233,6 +92444,57 @@ func (ec *executionContext) _APIKeyProfile(ctx context.Context, sel ast.Selectio
 			out.Values[i] = ec._APIKeyProfile_loadBalanceStrategy(ctx, field, obj)
 		case "traceStickyMode":
 			out.Values[i] = ec._APIKeyProfile_traceStickyMode(ctx, field, obj)
+		case "independentChannelWeights":
+			out.Values[i] = ec._APIKeyProfile_independentChannelWeights(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "channelWeights":
+			out.Values[i] = ec._APIKeyProfile_channelWeights(ctx, field, obj)
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var aPIKeyProfileChannelWeightImplementors = []string{"APIKeyProfileChannelWeight"}
+
+func (ec *executionContext) _APIKeyProfileChannelWeight(ctx context.Context, sel ast.SelectionSet, obj *objects.ProfileChannelWeight) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, aPIKeyProfileChannelWeightImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("APIKeyProfileChannelWeight")
+		case "channelID":
+			out.Values[i] = ec._APIKeyProfileChannelWeight_channelID(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "weight":
+			out.Values[i] = ec._APIKeyProfileChannelWeight_weight(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -112515,6 +112777,15 @@ func (ec *executionContext) marshalNAPIKeyProfile2githubᚗcomᚋloopljᚋaxonhu
 	return ec._APIKeyProfile(ctx, sel, &v)
 }
 
+func (ec *executionContext) marshalNAPIKeyProfileChannelWeight2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐProfileChannelWeight(ctx context.Context, sel ast.SelectionSet, v objects.ProfileChannelWeight) graphql.Marshaler {
+	return ec._APIKeyProfileChannelWeight(ctx, sel, &v)
+}
+
+func (ec *executionContext) unmarshalNAPIKeyProfileChannelWeightInput2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐProfileChannelWeight(ctx context.Context, v any) (objects.ProfileChannelWeight, error) {
+	res, err := ec.unmarshalInputAPIKeyProfileChannelWeightInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
 func (ec *executionContext) unmarshalNAPIKeyProfileInput2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyProfile(ctx context.Context, v any) (objects.APIKeyProfile, error) {
 	res, err := ec.unmarshalInputAPIKeyProfileInput(ctx, v)
 	return res, graphql.ErrorOnPath(ctx, err)
@@ -119269,6 +119540,71 @@ func (ec *executionContext) marshalOAPIKeyProfile2ᚖgithubᚗcomᚋloopljᚋaxo
 		return graphql.Null
 	}
 	return ec._APIKeyProfile(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalOAPIKeyProfileChannelWeight2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐProfileChannelWeightᚄ(ctx context.Context, sel ast.SelectionSet, v []objects.ProfileChannelWeight) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNAPIKeyProfileChannelWeight2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐProfileChannelWeight(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) unmarshalOAPIKeyProfileChannelWeightInput2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐProfileChannelWeightᚄ(ctx context.Context, v any) ([]objects.ProfileChannelWeight, error) {
+	if v == nil {
+		return nil, nil
+	}
+	var vSlice []any
+	vSlice = graphql.CoerceList(v)
+	var err error
+	res := make([]objects.ProfileChannelWeight, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNAPIKeyProfileChannelWeightInput2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐProfileChannelWeight(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
 }
 
 func (ec *executionContext) unmarshalOAPIKeyProfileInput2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyProfileᚄ(ctx context.Context, v any) ([]objects.APIKeyProfile, error) {

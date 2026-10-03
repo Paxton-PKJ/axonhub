@@ -43,6 +43,10 @@ func (s *APIKeyProfileTemplateService) CreateTemplate(ctx context.Context, input
 		if err := normalizeAndValidateProfileRoutingPolicy(profile); err != nil {
 			return nil, err
 		}
+
+		if err := validateProfileChannelWeights([]objects.APIKeyProfile{*profile}); err != nil {
+			return nil, err
+		}
 	}
 
 	create := client.APIKeyProfileTemplate.Create().
@@ -139,6 +143,10 @@ func (s *APIKeyProfileTemplateService) UpdateTemplate(ctx context.Context, id in
 			publishedProfile.TemplateID = nil
 			publishedProfile.TemplateName = ""
 			if err := normalizeAndValidateProfileRoutingPolicy(publishedProfile); err != nil {
+				return err
+			}
+
+			if err := validateProfileChannelWeights([]objects.APIKeyProfile{*publishedProfile}); err != nil {
 				return err
 			}
 
