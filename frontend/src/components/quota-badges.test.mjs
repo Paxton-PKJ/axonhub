@@ -8,7 +8,7 @@ const componentsDir = import.meta.dirname;
 const srcRoot = join(componentsDir, '..');
 
 function read(relativePath) {
-  return readFileSync(join(srcRoot, relativePath), 'utf8');
+  return readFileSync(join(srcRoot, relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 // Isolate the Codex render branch (between the Codex and XAI branch markers)

@@ -27,12 +27,16 @@ const (
 	FieldRequestID = "request_id"
 	// FieldChannelID holds the string denoting the channel_id field in the database.
 	FieldChannelID = "channel_id"
+	// FieldChannelAPIKeyIndex holds the string denoting the channel_api_key_index field in the database.
+	FieldChannelAPIKeyIndex = "channel_api_key_index"
 	// FieldDataStorageID holds the string denoting the data_storage_id field in the database.
 	FieldDataStorageID = "data_storage_id"
 	// FieldExternalID holds the string denoting the external_id field in the database.
 	FieldExternalID = "external_id"
 	// FieldModelID holds the string denoting the model_id field in the database.
 	FieldModelID = "model_id"
+	// FieldUpstreamModelID holds the string denoting the upstream_model_id field in the database.
+	FieldUpstreamModelID = "upstream_model_id"
 	// FieldFormat holds the string denoting the format field in the database.
 	FieldFormat = "format"
 	// FieldReasoningEffort holds the string denoting the reasoning_effort field in the database.
@@ -106,9 +110,11 @@ var Columns = []string{
 	FieldProjectID,
 	FieldRequestID,
 	FieldChannelID,
+	FieldChannelAPIKeyIndex,
 	FieldDataStorageID,
 	FieldExternalID,
 	FieldModelID,
+	FieldUpstreamModelID,
 	FieldFormat,
 	FieldReasoningEffort,
 	FieldChannelAPIKeySuffix,
@@ -218,6 +224,11 @@ func ByChannelID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldChannelID, opts...).ToFunc()
 }
 
+// ByChannelAPIKeyIndex orders the results by the channel_api_key_index field.
+func ByChannelAPIKeyIndex(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldChannelAPIKeyIndex, opts...).ToFunc()
+}
+
 // ByDataStorageID orders the results by the data_storage_id field.
 func ByDataStorageID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDataStorageID, opts...).ToFunc()
@@ -231,6 +242,11 @@ func ByExternalID(opts ...sql.OrderTermOption) OrderOption {
 // ByModelID orders the results by the model_id field.
 func ByModelID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldModelID, opts...).ToFunc()
+}
+
+// ByUpstreamModelID orders the results by the upstream_model_id field.
+func ByUpstreamModelID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUpstreamModelID, opts...).ToFunc()
 }
 
 // ByFormat orders the results by the format field.

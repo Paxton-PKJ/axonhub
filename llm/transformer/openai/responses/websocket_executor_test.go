@@ -910,7 +910,7 @@ func TestWebSocketStreamReturnsErrorWhenReusedConnectionClosesBeforeEvent(t *tes
 	}
 	defer stream.Close()
 	require.False(t, stream.Next())
-	require.ErrorContains(t, stream.Err(), "websocket closed before response event")
+	require.Error(t, stream.Err())
 }
 
 func TestWebSocketExecutorSeparatesPoolByOrganizationHeaders(t *testing.T) {

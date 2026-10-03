@@ -4031,6 +4031,11 @@ func (_q *RequestExecutionQuery) collectField(ctx context.Context, oneNode bool,
 				selectedFields = append(selectedFields, requestexecution.FieldChannelID)
 				fieldSeen[requestexecution.FieldChannelID] = struct{}{}
 			}
+		case "channelAPIKeyIndex":
+			if _, ok := fieldSeen[requestexecution.FieldChannelAPIKeyIndex]; !ok {
+				selectedFields = append(selectedFields, requestexecution.FieldChannelAPIKeyIndex)
+				fieldSeen[requestexecution.FieldChannelAPIKeyIndex] = struct{}{}
+			}
 		case "dataStorageID":
 			if _, ok := fieldSeen[requestexecution.FieldDataStorageID]; !ok {
 				selectedFields = append(selectedFields, requestexecution.FieldDataStorageID)
@@ -4045,6 +4050,11 @@ func (_q *RequestExecutionQuery) collectField(ctx context.Context, oneNode bool,
 			if _, ok := fieldSeen[requestexecution.FieldModelID]; !ok {
 				selectedFields = append(selectedFields, requestexecution.FieldModelID)
 				fieldSeen[requestexecution.FieldModelID] = struct{}{}
+			}
+		case "upstreamModelID":
+			if _, ok := fieldSeen[requestexecution.FieldUpstreamModelID]; !ok {
+				selectedFields = append(selectedFields, requestexecution.FieldUpstreamModelID)
+				fieldSeen[requestexecution.FieldUpstreamModelID] = struct{}{}
 			}
 		case "format":
 			if _, ok := fieldSeen[requestexecution.FieldFormat]; !ok {
