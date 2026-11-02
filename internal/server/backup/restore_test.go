@@ -347,7 +347,7 @@ func TestBackupService_Restore_RemapProfileChannelWeights(t *testing.T) {
 	data, err := json.MarshalIndent(backupData, "", "  ")
 	require.NoError(t, err)
 
-	err = service.Restore(ctx, data, RestoreOptions{
+	err = service.Restore(ctx, bytes.NewReader(data), RestoreOptions{
 		IncludeChannels:         true,
 		IncludeAPIKeys:          true,
 		ChannelConflictStrategy: ConflictStrategyOverwrite,
@@ -432,7 +432,7 @@ func TestBackupService_Restore_RemapProfileChannelWeights_KeepsUnmapped(t *testi
 	data, err := json.MarshalIndent(backupData, "", "  ")
 	require.NoError(t, err)
 
-	err = service.Restore(ctx, data, RestoreOptions{
+	err = service.Restore(ctx, bytes.NewReader(data), RestoreOptions{
 		IncludeChannels:         true,
 		IncludeAPIKeys:          true,
 		ChannelConflictStrategy: ConflictStrategyOverwrite,
@@ -515,7 +515,7 @@ func TestBackupService_Restore_RemapProfileChannelIDsAndWeightsTogether(t *testi
 	data, err := json.MarshalIndent(backupData, "", "  ")
 	require.NoError(t, err)
 
-	err = service.Restore(ctx, data, RestoreOptions{
+	err = service.Restore(ctx, bytes.NewReader(data), RestoreOptions{
 		IncludeChannels:         true,
 		IncludeAPIKeys:          true,
 		ChannelConflictStrategy: ConflictStrategyOverwrite,
