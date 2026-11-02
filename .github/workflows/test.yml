@@ -30,6 +30,28 @@ jobs:
         with:
           go-version: stable
 
+      - name: Generate GraphQL and Ent code
+        run: make generate
+
+      - name: Verify generated code is committed
+        id: generated-code
+        run: |
+          git diff --binary > "$RUNNER_TEMP/generated-code.patch"
+          git ls-files --others --exclude-standard -z -- internal/ent internal/server/gql > "$RUNNER_TEMP/generated-code-untracked"
+          while IFS= read -r -d '' path; do
+            git diff --no-index --binary -- /dev/null "$path" >> "$RUNNER_TEMP/generated-code.patch" || test "$?" -eq 1
+          done < "$RUNNER_TEMP/generated-code-untracked"
+          git diff --exit-code
+          test ! -s "$RUNNER_TEMP/generated-code-untracked"
+
+      - name: Upload generated code patch
+        if: failure() && steps.generated-code.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-code-patch
+          path: ${{ runner.temp }}/generated-code.patch
+          if-no-files-found: error
+
       - name: Test
         run: make test-backend-all
 
