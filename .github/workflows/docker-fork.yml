@@ -42,14 +42,19 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_REF }}
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Compute version and tags
         id: meta
         run: |
-          BASE_VERSION=$(git ls-remote --tags --refs https://github.com/looplj/axonhub.git 'v*' \
-            | sed 's#.*refs/tags/##' | sort -V | tail -n1)
+          # Resolve the official release contained in this source revision.
+          # Version sorting puts rc2 after rc.4, and the latest remote release
+          # can be newer than the revision selected for this build.
+          git fetch --no-tags https://github.com/looplj/axonhub.git \
+            'refs/tags/v*:refs/tags/upstream/v*'
+          BASE_VERSION=$(git describe --tags --match 'upstream/v*' --abbrev=0 HEAD 2>/dev/null || true)
+          BASE_VERSION=${BASE_VERSION#upstream/}
           if [ -z "$BASE_VERSION" ]; then
             BASE_VERSION=$(cat internal/build/VERSION 2>/dev/null || echo v0.0.0)
           fi
