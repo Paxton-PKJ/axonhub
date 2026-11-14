@@ -138,7 +138,7 @@ func TestProfileChannelWeightsSelector_OverridesOrderingWeightWithoutMutatingOri
 }
 
 func TestProfileChannelWeightsSelector_WeightDrivesFailoverOrder(t *testing.T) {
-	policy := &mockRetryPolicyProvider{policy: &biz.RetryPolicy{Enabled: true, MaxChannelRetries: 3}}
+	policy := &biz.RetryPolicy{Enabled: true, MaxChannelRetries: 3}
 	newCandidates := func() []*ChannelModelsCandidate {
 		return []*ChannelModelsCandidate{
 			profileWeightsCandidate(1, 10),
@@ -150,7 +150,7 @@ func TestProfileChannelWeightsSelector_WeightDrivesFailoverOrder(t *testing.T) {
 	// Control: without the profile selector the global weights drive the order.
 	globalSelector := WithLoadBalancedSelector(
 		&staticChannelSelector{candidates: newCandidates()},
-		NewLoadBalancer(policy, nil, NewWeightStrategy()),
+		NewLoadBalancer(nil, nil, NewWeightStrategy()),
 		policy,
 	)
 	globalResult, err := globalSelector.Select(context.Background(), &llm.Request{Model: "gpt-4"})
@@ -160,7 +160,7 @@ func TestProfileChannelWeightsSelector_WeightDrivesFailoverOrder(t *testing.T) {
 	// Given: profile weights invert the global order.
 	selector := WithLoadBalancedSelector(
 		WithProfileChannelWeightsSelector(&staticChannelSelector{candidates: newCandidates()}, map[int]int{1: 100, 2: 50, 3: 10}),
-		NewLoadBalancer(policy, nil, NewWeightStrategy()),
+		NewLoadBalancer(nil, nil, NewWeightStrategy()),
 		policy,
 	)
 
@@ -187,7 +187,7 @@ func TestSelectCandidates_IndependentMode_IgnoresChannelIDsAndTags(t *testing.T)
 			nil,
 		),
 	}}
-	middleware := selectCandidates(inbound, nil, &mockQuotaRoutingSettingsProvider{})
+	middleware := selectCandidates(inbound, nil)
 
 	// When
 	_, err := middleware.OnInboundLlmRequest(context.Background(), &llm.Request{Model: "model"})
@@ -210,7 +210,7 @@ func TestSelectCandidates_LegacyMode_UnchangedWhenIndependentOff(t *testing.T) {
 		}},
 		APIKey: apiKey,
 	}}
-	middleware := selectCandidates(inbound, nil, &mockQuotaRoutingSettingsProvider{})
+	middleware := selectCandidates(inbound, nil)
 
 	// When
 	_, err := middleware.OnInboundLlmRequest(context.Background(), &llm.Request{Model: "model"})
@@ -243,7 +243,7 @@ func TestSelectCandidates_IndependentMode_RespectsProjectUpperBound(t *testing.T
 			project,
 		),
 	}}
-	middleware := selectCandidates(inbound, nil, &mockQuotaRoutingSettingsProvider{})
+	middleware := selectCandidates(inbound, nil)
 
 	// When
 	_, err := middleware.OnInboundLlmRequest(context.Background(), &llm.Request{Model: "model"})
@@ -254,7 +254,7 @@ func TestSelectCandidates_IndependentMode_RespectsProjectUpperBound(t *testing.T
 }
 
 func TestSelectCandidates_IndependentMode_QuotaExhaustedStaysInProfile(t *testing.T) {
-	settings := &mockQuotaRoutingSettingsProvider{settings: biz.QuotaRoutingSettings{DefaultMode: objects.QuotaRoutingModeRemoveOnExhausted}}
+	settings := &RequestSettings{QuotaRouting: biz.QuotaRoutingSettings{DefaultMode: objects.QuotaRoutingModeRemoveOnExhausted}}
 	newInbound := func() *PersistentInboundTransformer {
 		return &PersistentInboundTransformer{state: &PersistenceState{
 			CandidateSelector: &staticChannelSelector{candidates: []*ChannelModelsCandidate{
@@ -263,6 +263,7 @@ func TestSelectCandidates_IndependentMode_QuotaExhaustedStaysInProfile(t *testin
 				quotaRoutingCandidate(3, ""),
 			}},
 			LoadBalancers: map[string]*LoadBalancer{},
+			Settings:      settings,
 			APIKey: independentWeightsAPIKey(
 				[]objects.ProfileChannelWeight{{ChannelID: 1, Weight: 80}, {ChannelID: 2, Weight: 20}},
 				nil,
@@ -276,7 +277,7 @@ func TestSelectCandidates_IndependentMode_QuotaExhaustedStaysInProfile(t *testin
 	inbound := newInbound()
 	middleware := selectCandidates(inbound, &mockQuotaStatusProvider{statuses: map[int]*biz.QuotaChannelStatus{
 		1: quotaExhaustedStatus(),
-	}}, settings)
+	}})
 
 	// When
 	_, err := middleware.OnInboundLlmRequest(context.Background(), &llm.Request{Model: "model"})
@@ -290,7 +291,7 @@ func TestSelectCandidates_IndependentMode_QuotaExhaustedStaysInProfile(t *testin
 	middleware = selectCandidates(inbound, &mockQuotaStatusProvider{statuses: map[int]*biz.QuotaChannelStatus{
 		1: quotaExhaustedStatus(),
 		2: quotaExhaustedStatus(),
-	}}, settings)
+	}})
 
 	// When
 	_, err = middleware.OnInboundLlmRequest(context.Background(), &llm.Request{Model: "model"})
@@ -427,11 +428,11 @@ func TestSelectCandidates_IndependentMode_StickyOutsideProfileIgnored(t *testing
 	trace := &ent.Trace{ID: 10, ThreadID: 20}
 	ctx := contexts.WithTrace(context.Background(), trace)
 
-	policy := &mockRetryPolicyProvider{policy: &biz.RetryPolicy{
+	policy := &biz.RetryPolicy{
 		Enabled:           true,
 		MaxChannelRetries: 2,
 		TraceStickyMode:   biz.TraceStickyPreferPreviousChannel,
-	}}
+	}
 	newSelector := func(stickyChannelID int) *LoadBalancedSelector {
 		return WithTraceStickyLoadBalancedSelector(
 			WithProfileChannelWeightsSelector(&staticChannelSelector{candidates: []*ChannelModelsCandidate{
@@ -440,7 +441,7 @@ func TestSelectCandidates_IndependentMode_StickyOutsideProfileIgnored(t *testing
 				profileWeightsCandidate(3, 30),
 				profileWeightsCandidate(4, 40),
 			}}, map[int]int{1: 100, 2: 50}),
-			NewLoadBalancer(policy, nil),
+			NewLoadBalancer(nil, nil),
 			policy,
 			&fakePreviousChannelProvider{traceChannelIDs: map[int]int{trace.ID: stickyChannelID}},
 		)
