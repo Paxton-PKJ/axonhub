@@ -34,6 +34,7 @@ import {
   ProxyConfig,
   ChannelPolicies,
   ChannelModelPrice,
+  ModelPrice,
   SaveChannelModelPriceInput,
   channelModelPriceSchema,
   TestChannelAPIKeysPayload,
@@ -98,6 +99,13 @@ const CREATE_CHANNEL_MUTATION = `
           disableUntilCron
           disableUntilTimezone
         }
+        scheduledDisable {
+          disableCron
+          disableTimezone
+          reenableMode
+          reenableCron
+          reenableTimezone
+        }
       }
       supportedModels
       autoSyncSupportedModels
@@ -115,6 +123,7 @@ const CREATE_CHANNEL_MUTATION = `
         hideOriginalModels
         hideMappedModels
         lowercaseModelId
+        syncModelPrices
         quotaRoutingMode
         proxy {
           type
@@ -199,6 +208,13 @@ const DUPLICATE_CHANNEL_MUTATION = `
           disableUntilCron
           disableUntilTimezone
         }
+        scheduledDisable {
+          disableCron
+          disableTimezone
+          reenableMode
+          reenableCron
+          reenableTimezone
+        }
       }
       supportedModels
       autoSyncSupportedModels
@@ -216,6 +232,7 @@ const DUPLICATE_CHANNEL_MUTATION = `
         hideOriginalModels
         hideMappedModels
         lowercaseModelId
+        syncModelPrices
         quotaRoutingMode
         proxy {
           type
@@ -300,6 +317,13 @@ const BULK_CREATE_CHANNELS_MUTATION = `
           disableUntilCron
           disableUntilTimezone
         }
+        scheduledDisable {
+          disableCron
+          disableTimezone
+          reenableMode
+          reenableCron
+          reenableTimezone
+        }
       }
       supportedModels
       autoSyncSupportedModels
@@ -317,6 +341,7 @@ const BULK_CREATE_CHANNELS_MUTATION = `
         hideOriginalModels
         hideMappedModels
         lowercaseModelId
+        syncModelPrices
         quotaRoutingMode
         proxy {
           type
@@ -400,6 +425,13 @@ const CHANNEL_FIELDS_FRAGMENT = `
           disableUntilCron
           disableUntilTimezone
         }
+        scheduledDisable {
+          disableCron
+          disableTimezone
+          reenableMode
+          reenableCron
+          reenableTimezone
+        }
       }
       supportedModels
       autoSyncSupportedModels
@@ -417,6 +449,7 @@ const CHANNEL_FIELDS_FRAGMENT = `
         hideOriginalModels
         hideMappedModels
         lowercaseModelId
+        syncModelPrices
         quotaRoutingMode
         proxy {
           type
@@ -667,6 +700,7 @@ const BULK_IMPORT_CHANNELS_MUTATION = `
           hideOriginalModels
           hideMappedModels
           lowercaseModelId
+          syncModelPrices
           quotaRoutingMode
           transformOptions {
             forceArrayInstructions
@@ -916,6 +950,7 @@ const BULK_UPDATE_CHANNEL_ORDERING_MUTATION = `
           hideOriginalModels
           hideMappedModels
           lowercaseModelId
+          syncModelPrices
           quotaRoutingMode
           transformOptions {
             forceArrayInstructions
@@ -999,6 +1034,13 @@ const CHANNEL_AUTO_DISABLE_COPY_SOURCES_QUERY = `
           disableUntilCron
           disableUntilTimezone
         }
+        scheduledDisable {
+          disableCron
+          disableTimezone
+          reenableMode
+          reenableCron
+          reenableTimezone
+        }
       }
     }
   }
@@ -1025,6 +1067,13 @@ const BULK_UPDATE_CHANNEL_AUTO_DISABLE_MUTATION = `
             disableUntilCron
             disableUntilTimezone
           }
+          scheduledDisable {
+            disableCron
+            disableTimezone
+            reenableMode
+            reenableCron
+            reenableTimezone
+          }
         }
       }
     }
@@ -1036,8 +1085,31 @@ const FETCH_MODELS_QUERY = `
     fetchModels(input: $input) {
       models {
         id
+        pricing {
+          items {
+            itemCode
+            pricing {
+              mode
+              usagePerUnit
+            }
+            promptWriteCacheVariants {
+              variantCode
+              pricing {
+                mode
+                usagePerUnit
+              }
+            }
+          }
+        }
       }
       error
+      fallback
+      fallbackReason
+      codexCatalogVersion {
+        version
+        source
+      }
+      codexCatalogSkippedReason
     }
   }
 `;
@@ -1119,8 +1191,16 @@ const CHANNEL_QUERY_FULL_NODE_SELECTION = `
               disableUntilCron
               disableUntilTimezone
             }
+            scheduledDisable {
+              disableCron
+              disableTimezone
+              reenableMode
+              reenableCron
+              reenableTimezone
+            }
           }
           credentials {
+            isOAuth
             apiKey
             apiKeys
             vertexApiKeys {
@@ -1150,6 +1230,7 @@ const CHANNEL_QUERY_FULL_NODE_SELECTION = `
             hideOriginalModels
             hideMappedModels
             lowercaseModelId
+            syncModelPrices
             quotaRoutingMode
             bodyOverrideOperations {
               op
@@ -1291,6 +1372,7 @@ const CHANNEL_QUERY_LIST_NODE_BASE_SELECTION = `
 const CHANNEL_QUERY_ROUTING_STATUS_SELECTION = `
            settings {
              quotaRoutingMode
+             syncModelPrices
            }
            providerQuotaStatus {
              status
@@ -1311,6 +1393,7 @@ const CHANNEL_QUERY_TAGS_SELECTION = `
 const CHANNEL_QUERY_PROXY_SELECTION = `
           settings {
             quotaRoutingMode
+            syncModelPrices
             proxy {
               type
               url
@@ -2307,14 +2390,35 @@ const SYNC_CHANNEL_MODELS_MUTATION = `
       channelID
       supportedModels
       manualModels
+      fallback
+      codexCatalogVersion {
+        version
+        source
+      }
+      codexCatalogSkippedReason
     }
   }
 `;
+
+const codexCatalogVersionSchema = z.object({
+  version: z.string(),
+  source: z.enum(['channel_version', 'channel_user_agent', 'npm', 'cache', 'builtin']),
+});
+
+export type CodexCatalogVersion = z.infer<typeof codexCatalogVersionSchema>;
+
+const codexCatalogSkippedReasonSchema = z.enum(['no_credentials', 'unsupported_url']);
+export type CodexCatalogSkippedReason = z.infer<typeof codexCatalogSkippedReasonSchema>;
+
+export type ModelCatalogFallbackReason = 'NO_CREDENTIALS' | 'AUTHORIZATION' | 'UNAVAILABLE';
 
 const syncChannelModelsPayloadSchema = z.object({
   channelID: z.string(),
   supportedModels: z.array(z.string()),
   manualModels: z.array(z.string()),
+  fallback: z.boolean(),
+  codexCatalogVersion: codexCatalogVersionSchema.nullable(),
+  codexCatalogSkippedReason: codexCatalogSkippedReasonSchema.nullable(),
 });
 
 export function useSyncChannelModels() {
@@ -2323,18 +2427,36 @@ export function useSyncChannelModels() {
   const { handleError } = useErrorHandler();
 
   return useMutation({
-    mutationFn: async (input: { channelID: string; pattern?: string }) => {
+    mutationFn: async ({ channelID, pattern }: { channelID: string; channelType: string; pattern?: string }) => {
       try {
-        const data = await graphqlRequest<{ syncChannelModels: unknown }>(SYNC_CHANNEL_MODELS_MUTATION, input);
+        const data = await graphqlRequest<{ syncChannelModels: unknown }>(SYNC_CHANNEL_MODELS_MUTATION, { channelID, pattern });
         return syncChannelModelsPayloadSchema.parse(data.syncChannelModels);
       } catch (error) {
         handleError(error, { context: 'Sync Channel Models' });
         throw error;
       }
     },
-    onSuccess: () => {
+    onSuccess: ({ fallback, codexCatalogVersion, codexCatalogSkippedReason }, input) => {
+      if (fallback && input.channelType === 'claudecode') {
+        toast.info(t('channels.messages.claudeCatalogManualSync'));
+        return;
+      }
+      if (codexCatalogSkippedReason) {
+        toast.info(t(`channels.messages.codexCatalogSyncSkipped.${codexCatalogSkippedReason}`));
+        return;
+      }
+      if (fallback) {
+        toast.warning(t('channels.messages.codexCatalogSyncFallback'));
+        return;
+      }
+      const description = codexCatalogVersion
+        ? t('channels.messages.codexCatalogVersion', {
+            version: codexCatalogVersion.version,
+            source: t(`channels.messages.codexCatalogVersionSources.${codexCatalogVersion.source}`),
+          })
+        : undefined;
       queryClient.invalidateQueries({ queryKey: ['channels'] });
-      toast.success(t('channels.messages.syncModelsSuccess'));
+      toast.success(t('channels.messages.syncModelsSuccess'), { description });
     },
   });
 }
@@ -2347,6 +2469,7 @@ export function useFetchModels() {
     mutationFn: async (input: {
       channelType: string;
       baseURL: string;
+      proxy?: ProxyConfig;
       apiKey?: string;
       projectID?: string;
       region?: string;
@@ -2355,8 +2478,12 @@ export function useFetchModels() {
       try {
         const data = await graphqlRequest<{
           fetchModels: {
-            models: Array<{ id: string }>;
+            models: Array<{ id: string; pricing?: ModelPrice | null }>;
             error?: string | null;
+            fallback: boolean;
+            fallbackReason: ModelCatalogFallbackReason | null;
+            codexCatalogVersion: CodexCatalogVersion | null;
+            codexCatalogSkippedReason: CodexCatalogSkippedReason | null;
           };
         }>(FETCH_MODELS_QUERY, { input });
         return data.fetchModels;
@@ -2365,10 +2492,10 @@ export function useFetchModels() {
         throw error;
       }
     },
-    onSuccess: (data) => {
+    onSuccess: (data, input) => {
       if (data.error) {
         toast.error(t('common.errors.internalServerError'));
-      } else {
+      } else if (!(data.fallback && (input.channelType === 'codex' || input.channelType === 'claudecode'))) {
         const count = data.models.length;
         if (count > 100) {
           toast.success(t('channels.messages.fetchModelsSuccessLarge', { count }));
