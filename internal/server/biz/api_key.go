@@ -1197,7 +1197,7 @@ func (s *APIKeyService) BulkArchiveAPIKeys(ctx context.Context, ids []int) error
 // RevealAPIKey renders the credential of an APIKey visible to the caller.
 func (s *APIKeyService) RevealAPIKey(ctx context.Context, key *ent.APIKey) (string, error) {
 	if err := authz.RequireDirectUser(ctx); err != nil {
-		return "", nil
+		return "", nil //nolint:nilerr // Non-direct callers receive a redacted empty credential without error.
 	}
 	caller, _ := contexts.GetUser(ctx)
 	isOwner := scopes.IsDirectOwner(ctx)
