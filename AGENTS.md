@@ -4,6 +4,10 @@ This file provides guidance to AI coding assistants when working with code in th
 
 > **Detailed rules are split into focused files under `.agents/rules/`**. See [Rules Index](#rules-index) below.
 
+## Fork 维护
+
+本仓库是 `looplj/axonhub` 的自用 fork，集成分支是 `main`。创建分支、PR、workflow 或同步上游之前，先读 [.agents/rules/fork-maintenance.md](.agents/rules/fork-maintenance.md)。
+
 ## Global Rules
 
 1. Do NOT run lint or build commands unless explicitly requested by the user.

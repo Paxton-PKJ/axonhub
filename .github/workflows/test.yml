@@ -4,16 +4,13 @@ name: Test
 on:
   push:
     branches:
-      - "main"
       - "unstable"
       - "release/**"
-      - "feature/**"
   pull_request:
     branches:
       - "main"
       - "unstable"
       - "release/**"
-      - "feature/**"
 env:
   GO111MODULE: on
 

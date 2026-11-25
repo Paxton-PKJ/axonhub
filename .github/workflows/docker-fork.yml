@@ -9,7 +9,7 @@ on:
       source_ref:
         description: Branch, tag or commit SHA to build
         required: true
-        default: feature/profile-channel-priority
+        default: main
       arch:
         description: Target architecture
         type: choice
