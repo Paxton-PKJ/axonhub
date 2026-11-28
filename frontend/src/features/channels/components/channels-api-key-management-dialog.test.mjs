@@ -769,6 +769,38 @@ test('stale rename rejects overwrite of concurrently rotated key, preserves draf
   });
 });
 
+test('repeated blur and save share a single rename while the mutation is pending', async () => {
+  let attempts = 0;
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const view = manager({
+    id: 'ch-blur',
+    type: 'openai',
+    name: 'blur',
+    credentials: { apiKeys: ['sk-edit-1111'] },
+  }, {
+    onUpdateChannel: async (_input, save) => {
+      attempts++;
+      await pending;
+      return save();
+    },
+  });
+  const row = () => nodes(apiKeyRows(view.render())[0]);
+  row().find((n) => n.props?.['aria-label'] === 'channels.dialogs.keyManagement.editName').props.onClick();
+  row().find((n) => n.type === 'Input').props.onChange({ target: { value: 'renamed' } });
+  const editing = row();
+  const input = editing.find((n) => n.type === 'Input');
+  const button = editing.find((n) => n.props?.['aria-label'] === 'common.buttons.save');
+  input.props.onBlur();
+  input.props.onBlur();
+  const clicked = button.props.onClick();
+  release();
+  await clicked;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 1);
+  assert.equal(view.getServerCredentials().apiKeyNames[0].name, 'renamed');
+});
+
 test('consecutive renames in same dialog chain credentialsVersion from previous save', async () => {
   const v0 = 'cred-ver-seq-0';
   const view = manager({

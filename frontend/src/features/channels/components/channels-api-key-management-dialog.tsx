@@ -101,7 +101,8 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
   const [editingNameKey, setEditingNameKey] = useState<string | null>(null);
   const [editingNameValue, setEditingNameValue] = useState('');
   const [editingNameError, setEditingNameError] = useState<string | null>(null);
-  const skipNameBlurRef = useRef(false);
+  // Blur, Enter, and click can arrive before React renders the pending mutation.
+  const nameEditRef = useRef<{ key: string; saving: boolean } | null>(null);
   // Service account rows keep their server-issued credentialRef: it is the identity the
   // disable/enable/test mutations and the disabled-key list use, and it never leaks the
   // JSON body. Removal rewrites the list without the removed row.
@@ -194,6 +195,7 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
     deleteDisabledAPIKeys.isPending;
 
   useEffect(() => {
+    nameEditRef.current = null;
     activeSessionRef.current += 1;
     snapshotVersionRef.current += 1;
     if (open) {
@@ -449,6 +451,7 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
   };
 
   const handleClose = () => {
+    nameEditRef.current = null;
     abortRef.current = true;
     activeSessionRef.current += 1;
     activeChannelIdRef.current = undefined;
@@ -780,19 +783,22 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
   };
 
   const cancelEditingKeyName = () => {
+    nameEditRef.current = null;
     setEditingNameKey(null);
     setEditingNameValue('');
     setEditingNameError(null);
   };
 
   const startEditingKeyName = (key: string) => {
-    skipNameBlurRef.current = false;
+    nameEditRef.current = { key, saving: false };
     setEditingNameKey(key);
     setEditingNameValue(nameMap.get(key) ?? '');
     setEditingNameError(null);
   };
 
   const handleSaveKeyName = async (key: string) => {
+    const edit = nameEditRef.current;
+    if (!edit || edit.key !== key || edit.saving) return;
     if (!hasLoadedCredentials || !canEditKeyNames) {
       cancelEditingKeyName();
       return;
@@ -810,6 +816,7 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
 
     const guard = captureSessionGuard();
     const nextNames = normalizeAPIKeyNamesForKeys(setAPIKeyName(localNames, key, check.normalized), validKeys);
+    edit.saving = true;
     try {
       const updated = await updateChannel.mutateAsync({
         id: guard.channelId,
@@ -818,7 +825,7 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
         },
         ...(baselineCredentialsVersion ? { expectedCredentialsVersion: baselineCredentialsVersion } : {}),
       });
-      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+      if (!isCurrentSession(guard.sessionId, guard.channelId) || nameEditRef.current !== edit) {
         return;
       }
       commitMutationResult(updated, { names: nextNames }, guard);
@@ -827,6 +834,8 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
       if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
         await refreshAfterConflict({ editingKey: key, guard });
       }
+    } finally {
+      edit.saving = false;
     }
   };
 
@@ -1130,19 +1139,13 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
                                       onKeyDown={(e) => {
                                         if (e.key === 'Enter') {
                                           e.preventDefault();
-                                          skipNameBlurRef.current = true;
                                           void handleSaveKeyName(key);
                                         } else if (e.key === 'Escape') {
                                           e.preventDefault();
-                                          skipNameBlurRef.current = true;
                                           cancelEditingKeyName();
                                         }
                                       }}
                                       onBlur={() => {
-                                        if (skipNameBlurRef.current) {
-                                          skipNameBlurRef.current = false;
-                                          return;
-                                        }
                                         if (editingNameError) {
                                           return;
                                         }
@@ -1158,10 +1161,7 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
                                       variant='ghost'
                                       className='h-7 w-7 shrink-0 p-0'
                                       onMouseDown={(e) => e.preventDefault()}
-                                      onClick={() => {
-                                        skipNameBlurRef.current = true;
-                                        return handleSaveKeyName(key);
-                                      }}
+                                      onClick={() => handleSaveKeyName(key)}
                                       disabled={isPending}
                                       aria-label={t('common.buttons.save')}
                                     >
@@ -1173,10 +1173,7 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
                                       variant='ghost'
                                       className='h-7 w-7 shrink-0 p-0'
                                       onMouseDown={(e) => e.preventDefault()}
-                                      onClick={() => {
-                                        skipNameBlurRef.current = true;
-                                        cancelEditingKeyName();
-                                      }}
+                                      onClick={cancelEditingKeyName}
                                       disabled={isPending}
                                       aria-label={t('common.buttons.cancel')}
                                     >
