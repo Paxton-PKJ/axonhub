@@ -929,10 +929,11 @@ test('late async mutation or baseline sync from previous channel never overwrite
   );
 
   // Trigger disable (starts background syncBaselineAfterStateMutation without awaiting).
-  const disableBtn = nodes(apiKeyRows(sameView.render())[0]).find(
+  const firstKeyRow = apiKeyRows(sameView.render())[0];
+  const disableBtn = nodes(firstKeyRow).find(
     (node) => node.props?.['aria-label'] === 'channels.dialogs.keyManagement.disable'
   );
-  const disablePopover = nodes(apiKeyRows(sameView.render())[0]).find(
+  const disablePopover = nodes(firstKeyRow).find(
     (node) => node.type === 'Popover' && nodes(node).includes(disableBtn)
   );
   disablePopover.props.onOpenChange(true);

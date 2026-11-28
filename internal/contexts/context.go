@@ -150,7 +150,7 @@ func ClearChannelAPIKey(ctx context.Context) {
 	if ctx == nil {
 		return
 	}
-	container, ok := ctx.Value(containerContextKey).(*ContextContainer)
+	container, ok := ctx.Value(containerContextKey).(*contextContainer)
 	if !ok || container == nil {
 		return
 	}

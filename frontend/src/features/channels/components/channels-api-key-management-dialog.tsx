@@ -1160,7 +1160,7 @@ export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange 
                                       onMouseDown={(e) => e.preventDefault()}
                                       onClick={() => {
                                         skipNameBlurRef.current = true;
-                                        void handleSaveKeyName(key);
+                                        return handleSaveKeyName(key);
                                       }}
                                       disabled={isPending}
                                       aria-label={t('common.buttons.save')}
