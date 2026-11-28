@@ -1,6 +1,10 @@
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useChannels } from '../context/channels-context';
 import { useChannelDetails } from '../data/channels';
+import type { Channel } from '../data/schema';
 import { ChannelsActionDialog } from './channels-action-dialog';
 import { ChannelsAPIKeyManagementDialog } from './channels-api-key-management-dialog';
 import { ChannelsArchiveDialog } from './channels-archive-dialog';
@@ -33,16 +37,38 @@ import { ChannelsTestHistoryDrawer } from './channels-test-history-drawer';
 import { ChannelsTransformOptionsDialog } from './channels-transform-options-dialog';
 
 export function ChannelsDialogs() {
+  const { t } = useTranslation();
   const { open, setOpen, currentRow: partialCurrentRow, setCurrentRow, selectedChannels } = useChannels();
   const detailsQuery = useChannelDetails(partialCurrentRow?.id, {
     enabled: Boolean(partialCurrentRow && open),
   });
+  const lastSyncedDetailsRef = useRef<Channel | null>(null);
+  const [hydratedRowId, setHydratedRowId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (detailsQuery.data && partialCurrentRow?.id === detailsQuery.data.id && partialCurrentRow !== detailsQuery.data) {
-      setCurrentRow(detailsQuery.data);
+    if (!partialCurrentRow) {
+      lastSyncedDetailsRef.current = null;
+      setHydratedRowId(null);
+      return;
     }
-  }, [detailsQuery.data, partialCurrentRow, setCurrentRow]);
+    if (hydratedRowId && hydratedRowId !== partialCurrentRow.id) {
+      lastSyncedDetailsRef.current = null;
+      setHydratedRowId(null);
+    }
+  }, [partialCurrentRow, hydratedRowId]);
+
+  const rowHasDetails = Boolean(partialCurrentRow && partialCurrentRow.credentials !== undefined);
+
+  useEffect(() => {
+    const fetched = detailsQuery.data;
+    if (!fetched || partialCurrentRow?.id !== fetched.id) return;
+    if (rowHasDetails && lastSyncedDetailsRef.current === fetched) return;
+    lastSyncedDetailsRef.current = fetched;
+    if (partialCurrentRow !== fetched) {
+      setCurrentRow(fetched);
+    }
+    setHydratedRowId(fetched.id);
+  }, [detailsQuery.data, partialCurrentRow, rowHasDetails, setCurrentRow]);
 
   useEffect(() => {
     if (open || !partialCurrentRow) return;
@@ -52,15 +78,59 @@ export function ChannelsDialogs() {
   }, [open, partialCurrentRow, setCurrentRow]);
 
   // List rows intentionally contain only fields required by visible columns.
-  // Delay row-scoped dialogs until the full snapshot has been loaded so hiding
-  // a column never removes data from edit/configuration dialogs.
+  // Delay row-scoped dialogs until the full snapshot has been loaded for the active channel ID,
+  // while keeping mounted dialogs intact when background/conflict refetches refresh the same row.
+  // Credential-bearing dialogs must never fall back to a partial list row when the initial fetch fails.
+  const detailsMatchesRow = Boolean(partialCurrentRow && detailsQuery.data?.id === partialCurrentRow.id);
+  const isRowHydrated = Boolean(
+    partialCurrentRow &&
+      ((rowHasDetails && hydratedRowId === partialCurrentRow.id) || (detailsMatchesRow && detailsQuery.data !== undefined))
+  );
+  const requiresFullDetails =
+    open === 'edit' || open === 'duplicate' || open === 'viewModels' || open === 'keyManagement';
+  const showDetailsLoadError = Boolean(
+    partialCurrentRow && requiresFullDetails && !isRowHydrated && detailsQuery.isError
+  );
   const currentRow =
-    partialCurrentRow && (!open || detailsQuery.isError || detailsQuery.data === partialCurrentRow)
-      ? (detailsQuery.data ?? partialCurrentRow)
+    partialCurrentRow && (!open || isRowHydrated || (detailsQuery.isError && !requiresFullDetails))
+      ? detailsMatchesRow && detailsQuery.data && (!rowHasDetails || lastSyncedDetailsRef.current !== detailsQuery.data)
+        ? detailsQuery.data
+        : partialCurrentRow
       : null;
   return (
     <>
       <ChannelsSystemSettingsDialog />
+
+      <Dialog
+        open={showDetailsLoadError}
+        onOpenChange={(isOpen) => {
+          if (!isOpen) {
+            setOpen(null);
+          }
+        }}
+      >
+        <DialogContent className='sm:max-w-md'>
+          <DialogHeader>
+            <DialogTitle>{t('channels.dialogs.detailsLoadError.title')}</DialogTitle>
+            <DialogDescription>{t('channels.dialogs.detailsLoadError.description')}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant='outline' onClick={() => setOpen(null)}>
+              {t('common.buttons.close')}
+            </Button>
+            <Button
+              onClick={() => {
+                void detailsQuery.refetch();
+              }}
+              disabled={detailsQuery.isFetching}
+            >
+              {detailsQuery.isFetching
+                ? t('channels.dialogs.detailsLoadError.retrying')
+                : t('channels.dialogs.detailsLoadError.retry')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <ChannelsTemplateManagerDialog open={open === 'templates'} onOpenChange={(isOpen) => setOpen(isOpen ? 'templates' : null)} />
 
@@ -315,6 +385,7 @@ export function ChannelsDialogs() {
 
           <ChannelsAPIKeyManagementDialog
             key={`channel-key-management-${currentRow.id}`}
+            currentRow={currentRow}
             open={open === 'keyManagement'}
             onOpenChange={(isOpen) => {
               if (!isOpen) {

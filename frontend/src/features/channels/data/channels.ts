@@ -87,6 +87,7 @@ const CREATE_CHANNEL_MUTATION = `
       type
       createdAt
       updatedAt
+      credentialsVersion
       baseURL
       name
       status
@@ -200,6 +201,7 @@ const DUPLICATE_CHANNEL_MUTATION = `
       type
       createdAt
       updatedAt
+      credentialsVersion
       baseURL
       name
       status
@@ -425,6 +427,7 @@ const CHANNEL_FIELDS_FRAGMENT = `
       type
       createdAt
       updatedAt
+      credentialsVersion
       baseURL
       name
       status
@@ -532,8 +535,8 @@ const CHANNEL_FIELDS_FRAGMENT = `
 `;
 
 const UPDATE_CHANNEL_MUTATION = `${CHANNEL_FIELDS_FRAGMENT}
-  mutation UpdateChannel($id: ID!, $input: UpdateChannelInput!, $apiKeyStateChanges: ChannelAPIKeyStateChangesInput, $expectedUpdatedAt: Time) {
-    updateChannel(id: $id, input: $input, apiKeyStateChanges: $apiKeyStateChanges, expectedUpdatedAt: $expectedUpdatedAt) {
+  mutation UpdateChannel($id: ID!, $input: UpdateChannelInput!, $apiKeyStateChanges: ChannelAPIKeyStateChangesInput, $expectedCredentialsVersion: String) {
+    updateChannel(id: $id, input: $input, apiKeyStateChanges: $apiKeyStateChanges, expectedCredentialsVersion: $expectedCredentialsVersion) {
       ...ChannelMutationFields
     }
   }
@@ -1211,6 +1214,7 @@ const CHANNEL_QUERY_FULL_NODE_SELECTION = `
           id
           createdAt
           updatedAt
+          credentialsVersion
           type
           baseURL
           name
@@ -1788,13 +1792,13 @@ async function updateChannelRequest(
   id: string,
   input: UpdateChannelInput,
   apiKeyStateChanges?: ChannelAPIKeyStateChangesInput,
-  expectedUpdatedAt?: string
+  expectedCredentialsVersion?: string
 ): Promise<Channel> {
   const data = await graphqlRequest<{ updateChannel: Channel }>(UPDATE_CHANNEL_MUTATION, {
     id,
     input,
     ...(apiKeyStateChanges ? { apiKeyStateChanges } : {}),
-    ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
+    ...(expectedCredentialsVersion ? { expectedCredentialsVersion } : {}),
   });
   return channelSchema.parse(data.updateChannel);
 }
@@ -1850,13 +1854,13 @@ export function useUpdateChannel() {
     mutationFn: async ({
       id,
       input,
-      expectedUpdatedAt,
+      expectedCredentialsVersion,
     }: {
       id: string;
       input: UpdateChannelInput;
-      expectedUpdatedAt?: string;
+      expectedCredentialsVersion?: string;
     }) => {
-      return updateChannelRequest(id, input, undefined, expectedUpdatedAt);
+      return updateChannelRequest(id, input, undefined, expectedCredentialsVersion);
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
@@ -1891,7 +1895,7 @@ export interface UpdateChannelSettingsMutationInput {
   patch: Partial<ChannelSettings>;
   input?: Omit<UpdateChannelInput, 'settings'>;
   apiKeyStateChanges?: ChannelAPIKeyStateChangesInput;
-  expectedUpdatedAt?: string;
+  expectedCredentialsVersion?: string;
 }
 
 /**
@@ -1918,7 +1922,7 @@ export function useUpdateChannelSettings() {
   const { handleError } = useErrorHandler();
 
   return useMutation({
-    mutationFn: ({ id, patch, input, apiKeyStateChanges, expectedUpdatedAt }: UpdateChannelSettingsMutationInput) =>
+    mutationFn: ({ id, patch, input, apiKeyStateChanges, expectedCredentialsVersion }: UpdateChannelSettingsMutationInput) =>
       enqueueChannelSettingsUpdate(id, async () => {
         // Settings-only edits go through the server-side patch mutation, which
         // merges under an expected-version guard and retries on conflict. An
@@ -1934,7 +1938,7 @@ export function useUpdateChannelSettings() {
         const hasAPIKeyStateChanges = Boolean(
           (apiKeyStateChanges?.enableKeys?.length ?? 0) > 0 || (apiKeyStateChanges?.disableKeys?.length ?? 0) > 0
         );
-        if (!hasChannelFields && !hasExplicitNullClear && !hasAPIKeyStateChanges && !expectedUpdatedAt) {
+        if (!hasChannelFields && !hasExplicitNullClear && !hasAPIKeyStateChanges && !expectedCredentialsVersion) {
           return updateChannelSettingsRequest(id, patch);
         }
 
@@ -1946,7 +1950,7 @@ export function useUpdateChannelSettings() {
             settings: mergeChannelSettingsForUpdate(latest.settings, patch),
           },
           apiKeyStateChanges,
-          expectedUpdatedAt
+          expectedCredentialsVersion
         );
       }),
     onSuccess: (data) => {

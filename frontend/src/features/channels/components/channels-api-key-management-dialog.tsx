@@ -55,6 +55,7 @@ import {
 } from '../utils/api-key-names';
 
 interface ChannelsAPIKeyManagementDialogProps {
+  currentRow: Channel;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
@@ -73,11 +74,11 @@ function maskAPIKey(key: string) {
  * - 单个/批量：测试、复制、禁用/启用、删除
  * - 密钥状态（正常 / 已禁用 / 测试中 / 测试结果）实时动态更新
  */
-export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsAPIKeyManagementDialogProps) {
+export function ChannelsAPIKeyManagementDialog({ currentRow, open, onOpenChange }: ChannelsAPIKeyManagementDialogProps) {
   const { t } = useTranslation();
-  const { currentRow, setCurrentRow, setOpen } = useChannels();
+  const { setCurrentRow, setOpen } = useChannels();
   const [bulkImportText, setBulkImportText] = useState('');
-  const [baselineUpdatedAt, setBaselineUpdatedAt] = useState<string | undefined>(undefined);
+  const [baselineCredentialsVersion, setBaselineCredentialsVersion] = useState<string | undefined>(undefined);
   const [conflictNotice, setConflictNotice] = useState<string | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [testingKey, setTestingKey] = useState<string | null>(null);
@@ -107,6 +108,13 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
   const [serviceAccounts, setServiceAccounts] = useState<NonNullable<ChannelCredentials['vertexServiceAccounts']>>([]);
   const [confirmDeleteServiceAccount, setConfirmDeleteServiceAccount] = useState<string | null>(null);
   const abortRef = useRef(false);
+  const activeSessionRef = useRef(0);
+  const activeChannelIdRef = useRef<string | undefined>(open ? currentRow?.id : undefined);
+  const snapshotVersionRef = useRef(0);
+  activeChannelIdRef.current = open ? currentRow?.id : undefined;
+
+  const isCurrentSession = (sessionId: number, channelId: string) =>
+    activeSessionRef.current === sessionId && activeChannelIdRef.current === channelId;
 
   const testSingleKey = useTestChannelAPIKey();
   const disableAPIKey = useDisableChannelAPIKey();
@@ -158,6 +166,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     [validKeys, selectedKeys, effectivelyDisabledSet]
   );
   const isVertexChannel = currentRow?.type === 'gemini_vertex';
+  const hasLoadedCredentials = Boolean(currentRow.credentials && baselineCredentialsVersion);
   const canEditKeyNames = channelSupportsAPIKeyNames(currentRow?.type, currentRow?.credentials);
   const enabledServiceAccountCount = serviceAccounts.filter(
     (account) => !!account.credentialRef && !effectivelyDisabledSet.has(account.credentialRef)
@@ -185,7 +194,10 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     deleteDisabledAPIKeys.isPending;
 
   useEffect(() => {
+    activeSessionRef.current += 1;
+    snapshotVersionRef.current += 1;
     if (open) {
+      activeChannelIdRef.current = currentRow?.id;
       setBulkImportText('');
       // Vertex 渠道的三元组密钥存在 vertexApiKeys,平铺密钥存在 apiKeys;
       // 普通渠道只用平铺 apiKeys。初始化时两个来源都读,避免批量导入时
@@ -196,7 +208,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
       setLocalKeys(initialKeys);
       setVertexBindings(currentRow?.credentials?.vertexApiKeys ?? []);
       setLocalNames(currentRow?.credentials?.apiKeyNames ?? []);
-      setBaselineUpdatedAt(currentRow?.updatedAt);
+      setBaselineCredentialsVersion(currentRow?.credentialsVersion ?? undefined);
       setConflictNotice(null);
       setEditingNameKey(null);
       setEditingNameValue('');
@@ -215,15 +227,14 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
       setConfirmEnableSelected(false);
       setConfirmDisableSelected(false);
       abortRef.current = false;
+    } else {
+      abortRef.current = true;
+      activeChannelIdRef.current = undefined;
     }
     // 仅在弹窗打开或切换渠道时初始化一次 localKeys；
     // 依赖 currentRow.credentials.apiKeys 会导致导入/删除后的本地更新被覆盖。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, currentRow?.id]);
-
-  if (!currentRow) {
-    return null;
-  }
 
   // Vertex 密钥只能作为三元组提交：平铺进 apiKeys 会变成没有项目绑定的密钥，
   // 所以列表里的 Vertex 密钥要从 apiKeys 里排除，绑定则按存活的 key 过滤后原样带回。
@@ -245,13 +256,31 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     };
   };
 
-  const applyChannelSnapshot = (snapshot: Channel) => {
-    if (!snapshot.credentials) {
-      if (snapshot.updatedAt) {
-        setBaselineUpdatedAt(snapshot.updatedAt);
+  type SessionGuard = {
+    sessionId: number;
+    channelId: string;
+    startedVersion?: number;
+  };
+
+  const captureSessionGuard = (): SessionGuard => ({
+    sessionId: activeSessionRef.current,
+    channelId: currentRow.id,
+    startedVersion: snapshotVersionRef.current,
+  });
+
+  const applyChannelSnapshot = (snapshot: Channel, guard?: SessionGuard) => {
+    if (guard) {
+      if (!isCurrentSession(guard.sessionId, guard.channelId) || snapshot.id !== guard.channelId) {
+        return validKeys;
       }
+      if (guard.startedVersion !== undefined && snapshotVersionRef.current > guard.startedVersion) {
+        return validKeys;
+      }
+    }
+    if (!snapshot.credentials) {
       return validKeys;
     }
+    snapshotVersionRef.current += 1;
     const flatKeys = snapshot.credentials.apiKeys ?? [];
     const boundKeys = (snapshot.credentials.vertexApiKeys ?? []).map((binding) => binding.apiKey);
     const nextKeys = [...flatKeys, ...boundKeys];
@@ -259,7 +288,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     setVertexBindings(snapshot.credentials.vertexApiKeys ?? []);
     setLocalNames(snapshot.credentials.apiKeyNames ?? []);
     setServiceAccounts(snapshot.credentials.vertexServiceAccounts ?? []);
-    setBaselineUpdatedAt(snapshot.updatedAt);
+    setBaselineCredentialsVersion(snapshot.credentialsVersion ?? undefined);
     setSelectedKeys((prev) => {
       if (prev.size === 0) {
         return prev;
@@ -273,7 +302,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
       });
       return next;
     });
-    setCurrentRow?.(snapshot);
+    setCurrentRow?.((prev) => (prev && prev.id === snapshot.id ? snapshot : prev));
     return nextKeys;
   };
 
@@ -284,14 +313,19 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
       names?: APIKeyName[];
       bindings?: NonNullable<ChannelCredentials['vertexApiKeys']>;
       accounts?: NonNullable<ChannelCredentials['vertexServiceAccounts']>;
-    }
+    },
+    guard: SessionGuard
   ) => {
+    if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+      return;
+    }
     setConflictNotice(null);
     if (updated?.credentials) {
-      applyChannelSnapshot(updated);
+      applyChannelSnapshot(updated, { sessionId: guard.sessionId, channelId: guard.channelId });
       return;
     }
 
+    snapshotVersionRef.current += 1;
     const nextKeys = committed.keys ?? localKeys;
     const nextNames = committed.names ?? localNames;
     const nextBindings = committed.bindings ?? vertexBindings;
@@ -322,11 +356,11 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     if (committed.accounts !== undefined) {
       setServiceAccounts(committed.accounts);
     }
-    if (updated?.updatedAt) {
-      setBaselineUpdatedAt(updated.updatedAt);
+    if (updated?.credentialsVersion) {
+      setBaselineCredentialsVersion(updated.credentialsVersion);
     }
     setCurrentRow?.((prev) => {
-      if (!prev) {
+      if (!prev || prev.id !== guard.channelId) {
         return prev;
       }
       const nextCredentials = isVertexChannel
@@ -349,29 +383,53 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     });
   };
 
-  const syncBaselineAfterStateMutation = async (): Promise<boolean> => {
-    if (typeof fetchLatestChannel !== 'function' || !baselineUpdatedAt) {
+  const syncBaselineAfterStateMutation = async (guard?: SessionGuard): Promise<boolean> => {
+    const activeGuard = guard ?? captureSessionGuard();
+    if (typeof fetchLatestChannel !== 'function' || !baselineCredentialsVersion) {
       return false;
     }
+    const startedVersion = snapshotVersionRef.current;
     try {
-      const latest = await fetchLatestChannel(currentRow.id);
-      applyChannelSnapshot(latest);
+      const latest = await fetchLatestChannel(activeGuard.channelId);
+      if (!isCurrentSession(activeGuard.sessionId, activeGuard.channelId) || snapshotVersionRef.current !== startedVersion) {
+        return false;
+      }
+      applyChannelSnapshot(latest, {
+        sessionId: activeGuard.sessionId,
+        channelId: activeGuard.channelId,
+        startedVersion,
+      });
       return Boolean(latest?.credentials);
     } catch {
       return false;
     }
   };
 
-  const refreshAfterConflict = async (options?: { editingKey?: string | null }) => {
+  const refreshAfterConflict = async (options?: { editingKey?: string | null; guard?: SessionGuard }) => {
+    const activeGuard = options?.guard ?? captureSessionGuard();
+    if (!isCurrentSession(activeGuard.sessionId, activeGuard.channelId)) {
+      return;
+    }
     void refetchDisabledKeys?.();
     let refreshedKeys = validKeys;
+    const startedVersion = snapshotVersionRef.current;
     if (typeof fetchLatestChannel === 'function') {
       try {
-        const latest = await fetchLatestChannel(currentRow.id);
-        refreshedKeys = applyChannelSnapshot(latest);
+        const latest = await fetchLatestChannel(activeGuard.channelId);
+        if (!isCurrentSession(activeGuard.sessionId, activeGuard.channelId)) {
+          return;
+        }
+        refreshedKeys = applyChannelSnapshot(latest, {
+          sessionId: activeGuard.sessionId,
+          channelId: activeGuard.channelId,
+          startedVersion,
+        });
       } catch {
         // Keep current keys when reload fails.
       }
+    }
+    if (!isCurrentSession(activeGuard.sessionId, activeGuard.channelId)) {
+      return;
     }
 
     const targetKey = options?.editingKey;
@@ -392,10 +450,12 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
 
   const handleClose = () => {
     abortRef.current = true;
+    activeSessionRef.current += 1;
+    activeChannelIdRef.current = undefined;
     setOpen(null);
     onOpenChange(false);
     setBulkImportText('');
-    setBaselineUpdatedAt(undefined);
+    setBaselineCredentialsVersion(undefined);
     setConflictNotice(null);
     setEditingNameKey(null);
     setEditingNameValue('');
@@ -415,7 +475,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
 
   /** 批量导入：多行文本，一行一个 key，去重、去空白，追加到渠道密钥列表 */
   const handleBulkImport = async () => {
-    if (isVertexChannel) {
+    if (!hasLoadedCredentials || isVertexChannel) {
       return;
     }
 
@@ -435,28 +495,32 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
       return;
     }
 
+    const guard = captureSessionGuard();
     const nextKeys = [...validKeys, ...deduped];
     const nextNames = normalizeAPIKeyNamesForKeys(localNames, nextKeys);
     try {
       const updated = await updateChannel.mutateAsync({
-        id: currentRow.id,
+        id: guard.channelId,
         input: {
           credentials: buildCredentials(nextKeys, serviceAccounts, nextNames),
         },
-        ...(baselineUpdatedAt ? { expectedUpdatedAt: baselineUpdatedAt } : {}),
+        ...(baselineCredentialsVersion ? { expectedCredentialsVersion: baselineCredentialsVersion } : {}),
       });
-      commitMutationResult(updated, { keys: nextKeys, names: nextNames });
+      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+        return;
+      }
+      commitMutationResult(updated, { keys: nextKeys, names: nextNames }, guard);
       setBulkImportText('');
     } catch (error) {
       if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
-        await refreshAfterConflict();
+        await refreshAfterConflict({ guard });
       }
     }
   };
 
   /** 删除 key（纯禁用 key 走 deleteDisabledAPIKeys；包含活动 key 时通过单次 updateChannel 原子提交并由服务端清理关联禁用记录） */
-  const deleteKeys = async (keysToDelete: string[]) => {
-    if (keysToDelete.length === 0) {
+  const deleteKeys = async (keysToDelete: string[], guard = captureSessionGuard()) => {
+    if (!hasLoadedCredentials || keysToDelete.length === 0) {
       return;
     }
 
@@ -479,9 +543,16 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     const nextBindings = vertexBindings.filter((binding) => !deleteSet.has(binding.apiKey));
 
     if (active.length === 0) {
-      await deleteDisabledAPIKeys.mutateAsync({ channelID: currentRow.id, keys: disabled });
-      const synced = await syncBaselineAfterStateMutation();
-      if (!synced) {
+      await deleteDisabledAPIKeys.mutateAsync({ channelID: guard.channelId, keys: disabled });
+      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+        return;
+      }
+      const synced = await syncBaselineAfterStateMutation(guard);
+      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+        return;
+      }
+      if (!synced && snapshotVersionRef.current === guard.startedVersion) {
+        snapshotVersionRef.current += 1;
         setLocalKeys(remainingKeys);
         setLocalNames(nextNames);
         setVertexBindings(nextBindings);
@@ -490,21 +561,26 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     }
 
     const updated = await updateChannel.mutateAsync({
-      id: currentRow.id,
+      id: guard.channelId,
       input: { credentials: buildCredentials(remainingKeys, serviceAccounts, nextNames) },
-      ...(baselineUpdatedAt ? { expectedUpdatedAt: baselineUpdatedAt } : {}),
+      ...(baselineCredentialsVersion ? { expectedCredentialsVersion: baselineCredentialsVersion } : {}),
     });
-    commitMutationResult(updated, { keys: remainingKeys, names: nextNames, bindings: nextBindings });
+    commitMutationResult(updated, { keys: remainingKeys, names: nextNames, bindings: nextBindings }, guard);
   };
 
   const handleDeleteSingle = async (key: string) => {
+    const guard = captureSessionGuard();
     try {
-      await deleteKeys([key]);
-      setConfirmDeleteKey(null);
+      await deleteKeys([key], guard);
+      if (isCurrentSession(guard.sessionId, guard.channelId)) {
+        setConfirmDeleteKey(null);
+      }
     } catch (error) {
       if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
-        setConfirmDeleteKey(null);
-        await refreshAfterConflict();
+        if (isCurrentSession(guard.sessionId, guard.channelId)) {
+          setConfirmDeleteKey(null);
+        }
+        await refreshAfterConflict({ guard });
       }
     }
   };
@@ -513,14 +589,19 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     if (selectedKeys.size === 0 || batchDeleteBlockedByLastKey || batchDeleteBlockedByLastEnabled) {
       return;
     }
+    const guard = captureSessionGuard();
     try {
-      await deleteKeys(Array.from(selectedKeys));
-      setConfirmDeleteSelected(false);
-      setSelectedKeys(new Set());
+      await deleteKeys(Array.from(selectedKeys), guard);
+      if (isCurrentSession(guard.sessionId, guard.channelId)) {
+        setConfirmDeleteSelected(false);
+        setSelectedKeys(new Set());
+      }
     } catch (error) {
       if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
-        setConfirmDeleteSelected(false);
-        await refreshAfterConflict();
+        if (isCurrentSession(guard.sessionId, guard.channelId)) {
+          setConfirmDeleteSelected(false);
+        }
+        await refreshAfterConflict({ guard });
       }
     }
   };
@@ -608,9 +689,13 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
   };
 
   const handleToggleDisable = async (key: string) => {
+    const guard = captureSessionGuard();
     try {
-      await disableAPIKey.mutateAsync({ channelID: currentRow.id, key });
-      void syncBaselineAfterStateMutation();
+      await disableAPIKey.mutateAsync({ channelID: guard.channelId, key });
+      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+        return;
+      }
+      void syncBaselineAfterStateMutation(guard);
       setConfirmDisableKey(null);
       setConfirmKeepDisabledKey(null);
     } catch {
@@ -619,15 +704,19 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
   };
 
   const handleToggleEnable = async (key: string) => {
+    const guard = captureSessionGuard();
     try {
-      await enableAPIKey.mutateAsync({ channelID: currentRow.id, key });
+      await enableAPIKey.mutateAsync({ channelID: guard.channelId, key });
+      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+        return;
+      }
       setTestResults((prev) => {
         const next = { ...prev };
         delete next[key];
         return next;
       });
       updatePendingTestDisabled(key, false);
-      void syncBaselineAfterStateMutation();
+      void syncBaselineAfterStateMutation(guard);
       setConfirmEnableKey(null);
     } catch {
       // handled by hooks
@@ -638,23 +727,28 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     if (!canBatchEnable) {
       return;
     }
+    const guard = captureSessionGuard();
+    const keysToEnable = [...selectedDisabledKeys];
     try {
-      await enableSelectedAPIKeys.mutateAsync({ channelID: currentRow.id, keys: selectedDisabledKeys });
+      await enableSelectedAPIKeys.mutateAsync({ channelID: guard.channelId, keys: keysToEnable });
+      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+        return;
+      }
       setTestResults((prev) => {
         const next = { ...prev };
-        selectedDisabledKeys.forEach((key) => {
+        keysToEnable.forEach((key) => {
           delete next[key];
         });
         return next;
       });
       setPendingTestDisabled((prev) => {
         const next = { ...prev };
-        selectedDisabledKeys.forEach((key) => {
+        keysToEnable.forEach((key) => {
           delete next[key];
         });
         return next;
       });
-      void syncBaselineAfterStateMutation();
+      void syncBaselineAfterStateMutation(guard);
       setConfirmEnableSelected(false);
       setSelectedKeys(new Set());
     } catch {
@@ -666,15 +760,21 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     if (!canBatchDisable) {
       return;
     }
+    const guard = captureSessionGuard();
     try {
-      await disableSelectedAPIKeys.mutateAsync({ channelID: currentRow.id, keys: selectedEnabledKeys });
-      void syncBaselineAfterStateMutation();
+      await disableSelectedAPIKeys.mutateAsync({ channelID: guard.channelId, keys: selectedEnabledKeys });
+      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+        return;
+      }
+      void syncBaselineAfterStateMutation(guard);
       setConfirmDisableSelected(false);
       setSelectedKeys(new Set());
     } catch (error) {
       if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
-        setConfirmDisableSelected(false);
-        await refreshAfterConflict();
+        if (isCurrentSession(guard.sessionId, guard.channelId)) {
+          setConfirmDisableSelected(false);
+        }
+        await refreshAfterConflict({ guard });
       }
     }
   };
@@ -693,7 +793,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
   };
 
   const handleSaveKeyName = async (key: string) => {
-    if (!canEditKeyNames) {
+    if (!hasLoadedCredentials || !canEditKeyNames) {
       cancelEditingKeyName();
       return;
     }
@@ -708,39 +808,52 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
       return;
     }
 
+    const guard = captureSessionGuard();
     const nextNames = normalizeAPIKeyNamesForKeys(setAPIKeyName(localNames, key, check.normalized), validKeys);
     try {
       const updated = await updateChannel.mutateAsync({
-        id: currentRow.id,
+        id: guard.channelId,
         input: {
           credentials: buildCredentials(validKeys, serviceAccounts, nextNames),
         },
-        ...(baselineUpdatedAt ? { expectedUpdatedAt: baselineUpdatedAt } : {}),
+        ...(baselineCredentialsVersion ? { expectedCredentialsVersion: baselineCredentialsVersion } : {}),
       });
-      commitMutationResult(updated, { names: nextNames });
+      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+        return;
+      }
+      commitMutationResult(updated, { names: nextNames }, guard);
       cancelEditingKeyName();
     } catch (error) {
       if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
-        await refreshAfterConflict({ editingKey: key });
+        await refreshAfterConflict({ editingKey: key, guard });
       }
     }
   };
 
   /** Removes one service account row; disabled records for its ref are pruned server-side. */
   const handleDeleteServiceAccount = async (credentialRef: string) => {
+    if (!hasLoadedCredentials) {
+      return;
+    }
+    const guard = captureSessionGuard();
     const remaining = serviceAccounts.filter((account) => account.credentialRef !== credentialRef);
     try {
       const updated = await updateChannel.mutateAsync({
-        id: currentRow.id,
+        id: guard.channelId,
         input: { credentials: buildCredentials(validKeys, remaining) },
-        ...(baselineUpdatedAt ? { expectedUpdatedAt: baselineUpdatedAt } : {}),
+        ...(baselineCredentialsVersion ? { expectedCredentialsVersion: baselineCredentialsVersion } : {}),
       });
-      commitMutationResult(updated, { accounts: remaining });
+      if (!isCurrentSession(guard.sessionId, guard.channelId)) {
+        return;
+      }
+      commitMutationResult(updated, { accounts: remaining }, guard);
       setConfirmDeleteServiceAccount(null);
     } catch (error) {
       if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
-        setConfirmDeleteServiceAccount(null);
-        await refreshAfterConflict();
+        if (isCurrentSession(guard.sessionId, guard.channelId)) {
+          setConfirmDeleteServiceAccount(null);
+        }
+        await refreshAfterConflict({ guard });
       }
     }
   };
@@ -792,9 +905,12 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                 onChange={(e) => setBulkImportText(e.target.value)}
                 placeholder={t('channels.dialogs.keyManagement.importPlaceholder')}
                 className='min-h-[64px] flex-1 font-mono text-xs'
-                disabled={isVertexChannel}
+                disabled={!hasLoadedCredentials || isVertexChannel}
               />
-              <Button onClick={handleBulkImport} disabled={isVertexChannel || isPending || bulkImportText.trim().length === 0}>
+              <Button
+                onClick={handleBulkImport}
+                disabled={!hasLoadedCredentials || isVertexChannel || isPending || bulkImportText.trim().length === 0}
+              >
                 {updateChannel.isPending ? <IconLoader2 className='mr-2 h-4 w-4 animate-spin' /> : <IconUpload className='mr-2 h-4 w-4' />}
                 {t('channels.dialogs.keyManagement.importButton')}
               </Button>

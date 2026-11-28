@@ -548,6 +548,7 @@ export const channelSchema = z.object({
   status: channelStatusSchema,
   policies: channelPoliciesSchema.optional().nullable(),
   credentials: channelCredentialsSchema.optional().nullable(),
+  credentialsVersion: z.string().optional().nullable(),
   providerQuotaStatus: providerQuotaStatusSchema.optional().nullable(),
   disabledAPIKeys: z.array(disabledAPIKeySchema).optional().nullable(),
   supportedModels: z.array(z.string()).default([]),

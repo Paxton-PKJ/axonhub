@@ -504,6 +504,36 @@ function getInitialBaseURL(row: Pick<Channel, 'type' | 'baseURL' | 'credentials'
   return isOfficialCodexChannel(row) ? getDefaultBaseURL('codex') : toHttpBaseURL(row.baseURL);
 }
 
+function buildFormValuesFromRow(row: Channel) {
+  return {
+    type: row.type,
+    baseURL: getInitialBaseURL(row),
+    name: row.name,
+    policies: row.policies ?? { stream: 'unlimited' as const },
+    supportedModels: row.supportedModels,
+    autoSyncSupportedModels: row.autoSyncSupportedModels,
+    autoSyncModelPattern: row.autoSyncModelPattern || '',
+    defaultTestModel: row.defaultTestModel,
+    tags: row.tags || [],
+    remark: row.remark || '',
+    credentials: {
+      // OAuth 类型的凭据存储在 apiKey 字段，不放入 apiKeys
+      apiKey: row.credentials?.apiKey || undefined,
+      apiKeys: row.credentials?.apiKeys || [],
+      apiKeyNames: row.credentials?.apiKeyNames || [],
+      vertexApiKeys: row.type === 'gemini_vertex' ? (row.credentials?.vertexApiKeys ?? undefined) : [],
+      vertexServiceAccounts: row.type === 'gemini_vertex' ? (row.credentials?.vertexServiceAccounts ?? undefined) : [],
+      managementApiKey: row.credentials?.managementApiKey || undefined,
+      gcp: {
+        region: row.credentials?.gcp?.region || '',
+        projectID: row.credentials?.gcp?.projectID || '',
+        jsonData: row.credentials?.gcp?.jsonData || '',
+      },
+    },
+    settings: row.settings ?? undefined,
+  };
+}
+
 // Used by both the submit path and fetch-models: reads the access_token out of
 // an OAuth/auth.json credential, falling back to the raw string.
 function parseOauthToken(oauthApiKey: string): string {
@@ -654,22 +684,14 @@ export function ChannelsActionDialog({
   const [showClearAllPopover, setShowClearAllPopover] = useState(false);
   const [applyPatternFilter, setApplyPatternFilter] = useState(false);
   const hasAutoSetDuplicateNameRef = useRef(false);
-  const [credentialBaselineUpdatedAt, setCredentialBaselineUpdatedAt] = useState<string | undefined>(() =>
-    isEdit ? currentRow?.updatedAt : undefined
+  const [sessionSnapshot, setSessionSnapshot] = useState<Channel | undefined>(() => initialRow);
+  const [credentialBaselineVersion, setCredentialBaselineVersion] = useState<string | undefined>(() =>
+    isEdit ? currentRow?.credentialsVersion ?? undefined : undefined
   );
   const [credentialConflictNotice, setCredentialConflictNotice] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (open && isEdit) {
-      setCredentialBaselineUpdatedAt(currentRow?.updatedAt);
-      setCredentialConflictNotice(null);
-    } else if (!open) {
-      setCredentialConflictNotice(null);
-    }
-    // Freeze the optimistic-lock baseline when the edit dialog opens for this channel;
-    // updating it on background currentRow refreshes would defeat stale-form detection.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, isEdit, currentRow?.id]);
+  const initializedSessionKeyRef = useRef<string | null>(null);
+  const pendingBaselineSeqRef = useRef(0);
+  const [sessionInitSeq, setSessionInitSeq] = useState(0);
   const codexThirdPartyBaseURLRef = useRef('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [showCommandCodeAuthCookie, setShowCommandCodeAuthCookie] = useState(false);
@@ -880,47 +902,6 @@ export function ChannelsActionDialog({
   });
 
   useEffect(() => {
-    if (!initialRow) return;
-
-    const provider = getProviderFromChannelType(initialRow.type) || 'openai';
-    setSelectedProvider(provider);
-    const apiFormat = getInitialApiFormatForChannel(
-      initialRow.type,
-      CHANNEL_CONFIGS[initialRow.type as ChannelType]?.apiFormat || OPENAI_CHAT_COMPLETIONS,
-      initialRow.settings?.modelProtocols,
-      initialRow.settings?.realtime
-    );
-    setSelectedApiFormat(apiFormat);
-    setResponsesTransport(getResponsesTransportFromChannel(initialRow));
-    setRealtimeHost(initialRow.settings?.realtime?.baseURL ?? '');
-    setRealtimeTimeout(getRealtimeHandshakeTimeoutInputValue(initialRow.settings?.realtime?.handshakeTimeoutMs));
-    setRealtimeClientEventsPerSecond(getRealtimeClientEventsPerSecondInputValue(initialRow.settings?.realtime?.clientEventsPerSecond));
-    setCodexResponsesWebSocket(getCodexResponsesWebSocketState(initialRow).enabled);
-    setUseGeminiVertex(initialRow.type === 'gemini_vertex');
-    setUseAnthropicAws(initialRow.type === 'anthropic_aws');
-    setUseKimiCoding(initialRow.type === 'moonshot_coding');
-
-    // Detect authMode for codex and claudecode
-    const savedAuthMode = getSavedAuthMode(initialRow);
-    if (savedAuthMode) setAuthMode(savedAuthMode);
-    if (initialRow.type === 'codex') setCodexAuthJSONText(getSavedCodexAuthJSONText(initialRow));
-
-    setPendingDeleteKeys(new Set());
-    setPendingEnableKeys(new Set());
-    setPendingDisableKeys(new Set());
-    setApiKeyNamesDirty(false);
-    setSelectedApiKeys(new Set());
-    setEditingApiKeyNameKey(null);
-    setEditingApiKeyNameValue('');
-    setEditingApiKeyNameError(null);
-    setShowAddKeyForm(false);
-    setNewSidebarKey('');
-    setNewSidebarKeyName('');
-    setNewSidebarKeyVisible(false);
-    setNewSidebarKeyError(null);
-  }, [initialRow]);
-
-  useEffect(() => {
     if (!open) {
       hasAutoSetDuplicateNameRef.current = false;
       resetCodexOAuth();
@@ -1092,90 +1073,117 @@ export function ChannelsActionDialog({
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
-    defaultValues:
-      isEdit && currentRow
-        ? {
-            type: currentRow.type,
-            baseURL: getInitialBaseURL(currentRow),
-            name: currentRow.name,
-            policies: currentRow.policies ?? { stream: 'unlimited' as const },
-            supportedModels: currentRow.supportedModels,
-            autoSyncSupportedModels: currentRow.autoSyncSupportedModels,
-            autoSyncModelPattern: currentRow.autoSyncModelPattern || '',
-            defaultTestModel: currentRow.defaultTestModel,
-            tags: currentRow.tags || [],
-            remark: currentRow.remark || '',
-            credentials: {
-              // OAuth 类型的凭据存储在 apiKey 字段，不放入 apiKeys
-              apiKey: currentRow.credentials?.apiKey || undefined,
-              apiKeys: currentRow.credentials?.apiKeys || [],
-              apiKeyNames: currentRow.credentials?.apiKeyNames || [],
-              vertexApiKeys: currentRow.type === 'gemini_vertex' ? (currentRow.credentials?.vertexApiKeys ?? undefined) : [],
-              vertexServiceAccounts: currentRow.type === 'gemini_vertex' ? (currentRow.credentials?.vertexServiceAccounts ?? undefined) : [],
-              managementApiKey: currentRow.credentials?.managementApiKey || undefined,
-              gcp: {
-                region: currentRow.credentials?.gcp?.region || '',
-                projectID: currentRow.credentials?.gcp?.projectID || '',
-                jsonData: currentRow.credentials?.gcp?.jsonData || '',
-              },
+    defaultValues: initialRow
+      ? buildFormValuesFromRow(initialRow)
+      : {
+          type: derivedChannelType,
+          baseURL: getDefaultBaseURL(derivedChannelType),
+          name: '',
+          policies: { stream: 'unlimited' },
+          credentials: {
+            apiKeys: [],
+            apiKeyNames: [],
+            vertexApiKeys: [],
+            vertexServiceAccounts: [],
+            managementApiKey: undefined,
+            gcp: {
+              region: '',
+              projectID: '',
+              jsonData: '',
             },
-            settings: currentRow.settings ?? undefined,
-          }
-        : duplicateFromRow
-          ? {
-              type: duplicateFromRow.type,
-              baseURL: getInitialBaseURL(duplicateFromRow),
-              name: duplicateFromRow.name,
-              policies: duplicateFromRow.policies ?? { stream: 'unlimited' },
-              supportedModels: duplicateFromRow.supportedModels,
-              autoSyncSupportedModels: duplicateFromRow.autoSyncSupportedModels,
-              autoSyncModelPattern: duplicateFromRow.autoSyncModelPattern || '',
-              defaultTestModel: duplicateFromRow.defaultTestModel,
-              tags: duplicateFromRow.tags || [],
-              remark: duplicateFromRow.remark || '',
-              settings: duplicateFromRow.settings ?? undefined,
-              credentials: {
-                // OAuth 类型的凭据存储在 apiKey 字段，不放入 apiKeys
-                apiKey: duplicateFromRow.credentials?.apiKey || undefined,
-                apiKeys: duplicateFromRow.credentials?.apiKeys || [],
-                apiKeyNames: duplicateFromRow.credentials?.apiKeyNames || [],
-                vertexApiKeys: duplicateFromRow.type === 'gemini_vertex' ? (duplicateFromRow.credentials?.vertexApiKeys ?? undefined) : [],
-                vertexServiceAccounts:
-                  duplicateFromRow.type === 'gemini_vertex'
-                    ? (duplicateFromRow.credentials?.vertexServiceAccounts ?? undefined)
-                    : [],
-                managementApiKey: duplicateFromRow.credentials?.managementApiKey || undefined,
-                gcp: {
-                  region: duplicateFromRow.credentials?.gcp?.region || '',
-                  projectID: duplicateFromRow.credentials?.gcp?.projectID || '',
-                  jsonData: duplicateFromRow.credentials?.gcp?.jsonData || '',
-                },
-              },
-            }
-          : {
-              type: derivedChannelType,
-              baseURL: getDefaultBaseURL(derivedChannelType),
-              name: '',
-              policies: { stream: 'unlimited' },
-              credentials: {
-                apiKeys: [],
-                apiKeyNames: [],
-                vertexApiKeys: [],
-                vertexServiceAccounts: [],
-                managementApiKey: undefined,
-                gcp: {
-                  region: '',
-                  projectID: '',
-                  jsonData: '',
-                },
-              },
-              supportedModels: [],
-              defaultTestModel: '',
-              tags: [],
-              remark: '',
-              settings: undefined,
-            },
+          },
+          supportedModels: [],
+          defaultTestModel: '',
+          tags: [],
+          remark: '',
+          settings: undefined,
+        },
   });
+
+  // Initialize form, settings, sidebar drafts, and optimistic-lock version atomically from
+  // a single detail snapshot when an edit/duplicate session opens, while preserving pending
+  // user drafts if background refetches deliver a new row object for the same channel ID.
+  useEffect(() => {
+    if (!open) {
+      initializedSessionKeyRef.current = null;
+      setCredentialConflictNotice(null);
+      return;
+    }
+    if (!initialRow) {
+      return;
+    }
+
+    const mode = isEdit ? 'edit' : isDuplicate ? 'duplicate' : 'create';
+    const sessionKey = `${mode}:${initialRow.id}`;
+    if (initializedSessionKeyRef.current === sessionKey) {
+      return;
+    }
+    initializedSessionKeyRef.current = sessionKey;
+
+    form.reset(buildFormValuesFromRow(initialRow));
+    setSessionSnapshot(initialRow);
+    setCredentialBaselineVersion(isEdit ? initialRow.credentialsVersion ?? undefined : undefined);
+    setCredentialConflictNotice(null);
+
+    setSupportedModels(initialRow.supportedModels || []);
+    setManualModels(initialRow.manualModels || []);
+    setProxyType((initialRow.settings?.proxy?.type as ProxyType) || ProxyType.ENVIRONMENT);
+    setProxyUrl(initialRow.settings?.proxy?.url || '');
+    setProxyUsername(initialRow.settings?.proxy?.username || '');
+    setProxyPassword(initialRow.settings?.proxy?.password || '');
+    setPassThroughUserAgent(initialRow.settings?.passThroughUserAgent ?? null);
+    setPassThroughBody(initialRow.settings?.passThroughBody ?? null);
+    setQuotaRoutingMode(recallQuotaRoutingMode(initialRow.settings));
+    setRetryableStatusCodesText(formatRetryableStatusCodes(initialRow.settings?.retryableStatusCodes));
+    setRetryableErrorPatternsText(formatRetryableErrorPatterns(initialRow.settings?.retryableErrorPatterns));
+    setMaxSingleChannelRetriesText(formatMaxSingleChannelRetries(initialRow.settings?.maxSingleChannelRetries));
+    setResponseTimeoutMode(initialRow.settings?.responseTimeout?.mode === 'CUSTOM' ? 'CUSTOM' : 'INHERIT');
+    setStreamFirstEventTimeoutText(formatResponseTimeoutSeconds(initialRow.settings?.responseTimeout?.streamFirstEventTimeoutSeconds));
+    setNonStreamResponseTimeoutText(formatResponseTimeoutSeconds(initialRow.settings?.responseTimeout?.nonStreamResponseTimeoutSeconds));
+    setApiKeyStrategy(initialRow.settings?.apiKeyStrategy ?? 'sticky');
+    setApiKeyRoundRobinSwitchAfter(initialRow.settings?.apiKeyRoundRobinSwitchAfter ?? 1);
+
+    const provider = getProviderFromChannelType(initialRow.type) || 'openai';
+    setSelectedProvider(provider);
+    const apiFormat = getInitialApiFormatForChannel(
+      initialRow.type,
+      CHANNEL_CONFIGS[initialRow.type as ChannelType]?.apiFormat || OPENAI_CHAT_COMPLETIONS,
+      initialRow.settings?.modelProtocols,
+      initialRow.settings?.realtime
+    );
+    setSelectedApiFormat(apiFormat);
+    setResponsesTransport(getResponsesTransportFromChannel(initialRow));
+    setRealtimeHost(initialRow.settings?.realtime?.baseURL ?? '');
+    setRealtimeTimeout(getRealtimeHandshakeTimeoutInputValue(initialRow.settings?.realtime?.handshakeTimeoutMs));
+    setRealtimeClientEventsPerSecond(getRealtimeClientEventsPerSecondInputValue(initialRow.settings?.realtime?.clientEventsPerSecond));
+    setCodexResponsesWebSocket(getCodexResponsesWebSocketState(initialRow).enabled);
+    setPreferResponsesWebSocket(undefined);
+    setUseGeminiVertex(initialRow.type === 'gemini_vertex');
+    setUseAnthropicAws(initialRow.type === 'anthropic_aws');
+    setUseKimiCoding(initialRow.type === 'moonshot_coding');
+
+    const savedAuthMode = getSavedAuthMode(initialRow);
+    setAuthMode(savedAuthMode ?? 'official');
+    setCodexAuthJSONText(initialRow.type === 'codex' ? getSavedCodexAuthJSONText(initialRow) : '');
+
+    setPendingDeleteKeys(new Set());
+    setPendingEnableKeys(new Set());
+    setPendingDisableKeys(new Set());
+    setApiKeyNamesDirty(false);
+    setSelectedApiKeys(new Set());
+    setEditingApiKeyNameKey(null);
+    setEditingApiKeyNameValue('');
+    setEditingApiKeyNameError(null);
+    setShowAddKeyForm(false);
+    setNewSidebarKey('');
+    setNewSidebarKeyName('');
+    setNewSidebarKeyVisible(false);
+    setNewSidebarKeyError(null);
+
+    pendingBaselineSeqRef.current += 1;
+    setSessionInitSeq(pendingBaselineSeqRef.current);
+  }, [open, isEdit, isDuplicate, initialRow, form]);
+
   const { dirtyFields } = form.formState;
   const hasFormChanges = Object.keys(dirtyFields).length > 0;
   const keepSavedClaudeOAuth =
@@ -1225,8 +1233,15 @@ export function ChannelsActionDialog({
   });
   const initialLocalSettings = useRef(localSettingsSnapshot);
   useEffect(() => {
-    if (!open) initialLocalSettings.current = localSettingsSnapshot;
-  }, [open, localSettingsSnapshot]);
+    if (!open) {
+      initialLocalSettings.current = localSettingsSnapshot;
+      return;
+    }
+    if (pendingBaselineSeqRef.current > 0 && pendingBaselineSeqRef.current === sessionInitSeq) {
+      initialLocalSettings.current = localSettingsSnapshot;
+      pendingBaselineSeqRef.current = 0;
+    }
+  }, [open, sessionInitSeq, localSettingsSnapshot]);
 
   const vertexApiKeyFields = useFieldArray({ control: form.control, name: 'credentials.vertexApiKeys' });
   const vertexServiceAccountFields = useFieldArray({ control: form.control, name: 'credentials.vertexServiceAccounts' });
@@ -1260,10 +1275,10 @@ export function ChannelsActionDialog({
   const serverDisabledMap = useMemo(() => new Map(activeDisabledKeys.map((dk) => [dk.key, dk])), [activeDisabledKeys]);
   const disabledKeySet = useMemo(() => new Set(activeDisabledKeys.map((dk) => dk.key)), [activeDisabledKeys]);
 
-  // Keys that exist in the backend baseline (used to distinguish saved keys vs unsaved drafts)
+  // Keys that exist in the initialized edit session snapshot (used to distinguish saved keys vs unsaved drafts)
   const savedAPIKeySet = useMemo(
-    () => new Set((currentRow?.credentials?.apiKeys || []).filter((k) => k.trim().length > 0)),
-    [currentRow?.credentials?.apiKeys]
+    () => new Set(((sessionSnapshot ?? currentRow)?.credentials?.apiKeys || []).filter((k) => k.trim().length > 0)),
+    [sessionSnapshot, currentRow]
   );
 
   const sidebarSummary = useMemo(
@@ -2079,13 +2094,17 @@ export function ChannelsActionDialog({
         });
 
         const hasCredentialsDraft = Boolean(updateInput.credentials) || Boolean(apiKeyStateChanges);
+        if (hasCredentialsDraft && !credentialBaselineVersion) {
+          setCredentialConflictNotice(t('channels.dialogs.detailsLoadError.description'));
+          return;
+        }
         await updateChannelSettings.mutateAsync({
           id: currentRow.id,
           input: updateInput,
           patch: settingsPatch,
           apiKeyStateChanges,
-          ...(hasCredentialsDraft && credentialBaselineUpdatedAt
-            ? { expectedUpdatedAt: credentialBaselineUpdatedAt }
+          ...(hasCredentialsDraft && credentialBaselineVersion
+            ? { expectedCredentialsVersion: credentialBaselineVersion }
             : {}),
         });
         setCredentialConflictNotice(null);

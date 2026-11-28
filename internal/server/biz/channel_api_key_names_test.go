@@ -41,8 +41,10 @@ import (
 	"github.com/looplj/axonhub/internal/ent/migrate"
 	entrequest "github.com/looplj/axonhub/internal/ent/request"
 	"github.com/looplj/axonhub/internal/objects"
+	"github.com/looplj/axonhub/internal/pkg/xcache/live"
 	"github.com/looplj/axonhub/internal/pkg/xerrors"
 	"github.com/looplj/axonhub/internal/scopes"
+	"github.com/looplj/axonhub/internal/server/biz/provider_quota"
 	"github.com/looplj/axonhub/internal/server/events"
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
@@ -320,10 +322,10 @@ func TestChannelService_DisableSelectedAPIKeys(t *testing.T) {
 			APIKeys: []string{"sk-1", "sk-2", "sk-3", "sk-4", "sk-5", ""},
 		}).
 		SetDisabledAPIKeys([]objects.DisabledAPIKey{
-			{Key: "sk-2", ErrorCode: 401, Reason: manualDisableReason},                    // already manually disabled
-			{Key: "sk-3", ErrorCode: 429, Reason: "quota exhausted", QuotaDisabled: true},   // quota disabled
-			{Key: "sk-4", ErrorCode: 500, Reason: "expired temp", ExpiresAt: &expired},      // expired -> treated enabled
-			{Key: "sk-5", ErrorCode: 429, Reason: "temp limit", ExpiresAt: &unexpiredTemp},  // active temporary non-quota disable
+			{Key: "sk-2", ErrorCode: 401, Reason: manualDisableReason},                     // already manually disabled
+			{Key: "sk-3", ErrorCode: 429, Reason: "quota exhausted", QuotaDisabled: true},  // quota disabled
+			{Key: "sk-4", ErrorCode: 500, Reason: "expired temp", ExpiresAt: &expired},     // expired -> treated enabled
+			{Key: "sk-5", ErrorCode: 429, Reason: "temp limit", ExpiresAt: &unexpiredTemp}, // active temporary non-quota disable
 		}).
 		SetSupportedModels([]string{"gpt-4o"}).
 		SetDefaultTestModel("gpt-4o").
@@ -376,6 +378,14 @@ func TestChannelService_DisableSelectedAPIKeys(t *testing.T) {
 	err = svc.DisableSelectedAPIKeys(readOnlyCtx, ch.ID, nil)
 	require.ErrorIs(t, err, privacy.Deny)
 
+	readOnlyUser.Edges.ProjectUsers = []*ent.UserProject{{ProjectID: 42, IsOwner: true}}
+	projectOwnerCtx := contexts.WithProjectID(readOnlyCtx, 42)
+	require.ErrorIs(t, svc.DisableSelectedAPIKeys(projectOwnerCtx, ch.ID, nil), privacy.Deny)
+	_, err = svc.UpdateChannel(WithExpectedChannelCredentialsVersion(projectOwnerCtx, "old-version"), ch.ID, &ent.UpdateChannelInput{})
+	var forbidden *xerrors.CodedError
+	require.ErrorAs(t, err, &forbidden)
+	require.Equal(t, xerrors.ErrCodeForbidden, forbidden.Code)
+
 	// Rolling back an outer transaction does not persist or emit disable events.
 	// Re-enable sk-4 first so sk-1 is not the sole enabled key when testing rollback.
 	require.NoError(t, svc.EnableAPIKey(ctx, ch.ID, "sk-4"))
@@ -391,8 +401,8 @@ func TestChannelService_DisableSelectedAPIKeys(t *testing.T) {
 	require.Len(t, afterRollback.DisabledAPIKeys, 3)
 }
 
-func TestChannelService_UpdateChannel_ExpectedUpdatedAtAndConcurrentDisable(t *testing.T) {
-	t.Run("stale expectedUpdatedAt rejects rename without overwriting rotated keys", func(t *testing.T) {
+func TestChannelService_UpdateChannel_ExpectedCredentialsVersionAndConcurrentDisable(t *testing.T) {
+	t.Run("stale expectedCredentialsVersion rejects rename without overwriting rotated keys", func(t *testing.T) {
 		svc, client, ctx := setupChannelNamesBizTest(t)
 
 		created, err := svc.CreateChannel(ctx, ent.CreateChannelInput{
@@ -406,7 +416,7 @@ func TestChannelService_UpdateChannel_ExpectedUpdatedAtAndConcurrentDisable(t *t
 			DefaultTestModel: "gpt-4o",
 		})
 		require.NoError(t, err)
-		staleUpdatedAt := created.UpdatedAt
+		staleVersion := objects.ChannelCredentialsVersion(created.Credentials, created.DisabledAPIKeys)
 
 		// Another admin rotates sk-2 -> sk-3 before the rename saves.
 		rotated, err := svc.UpdateChannel(ctx, created.ID, &ent.UpdateChannelInput{
@@ -415,11 +425,12 @@ func TestChannelService_UpdateChannel_ExpectedUpdatedAtAndConcurrentDisable(t *t
 			},
 		})
 		require.NoError(t, err)
-		require.True(t, rotated.UpdatedAt.After(staleUpdatedAt))
+		rotatedVersion := objects.ChannelCredentialsVersion(rotated.Credentials, rotated.DisabledAPIKeys)
+		require.NotEqual(t, staleVersion, rotatedVersion)
 
-		// Submitting the stale snapshot with staleUpdatedAt fails instead of restoring sk-2.
+		// Submitting the stale snapshot with staleVersion fails instead of restoring sk-2.
 		_, err = svc.UpdateChannel(
-			WithExpectedChannelVersion(ctx, staleUpdatedAt),
+			WithExpectedChannelCredentialsVersion(ctx, staleVersion),
 			created.ID,
 			&ent.UpdateChannelInput{
 				Credentials: &objects.ChannelCredentials{
@@ -437,9 +448,24 @@ func TestChannelService_UpdateChannel_ExpectedUpdatedAtAndConcurrentDisable(t *t
 		require.Equal(t, []string{"sk-1", "sk-3"}, afterConflict.Credentials.APIKeys)
 		require.Empty(t, afterConflict.Credentials.NameOf("sk-1"))
 
-		// Re-submitting against the refreshed snapshot and keys commits cleanly.
+		// Status toggle alone must not block or invalidate credential version, nor miss sibling updates.
+		require.NoError(t, svc.BulkDisableChannels(ctx, []int{created.ID}))
+		// Stale pre-rotation draft still fails even after status toggles.
+		_, err = svc.UpdateChannel(
+			WithExpectedChannelCredentialsVersion(ctx, staleVersion),
+			created.ID,
+			&ent.UpdateChannelInput{
+				Credentials: &objects.ChannelCredentials{
+					APIKeys:     []string{"sk-1", "sk-2"},
+					APIKeyNames: []objects.APIKeyName{{Key: "sk-1", Name: "primary"}},
+				},
+			},
+		)
+		require.ErrorIs(t, err, ErrChannelUpdatedConcurrently)
+
+		// Re-submitting against the rotated credentials version commits cleanly.
 		renamed, err := svc.UpdateChannel(
-			WithExpectedChannelVersion(ctx, rotated.UpdatedAt),
+			WithExpectedChannelCredentialsVersion(ctx, rotatedVersion),
 			created.ID,
 			&ent.UpdateChannelInput{
 				Credentials: &objects.ChannelCredentials{
@@ -451,6 +477,57 @@ func TestChannelService_UpdateChannel_ExpectedUpdatedAtAndConcurrentDisable(t *t
 		require.NoError(t, err)
 		require.Equal(t, []string{"sk-1", "sk-3"}, renamed.Credentials.APIKeys)
 		require.Equal(t, "primary", renamed.Credentials.NameOf("sk-1"))
+	})
+
+	t.Run("rapid credential updates on one channel never push updated_at into future or hide sibling reloads", func(t *testing.T) {
+		svc, client, ctx := setupChannelNamesBizTest(t)
+
+		chA, err := svc.CreateChannel(ctx, ent.CreateChannelInput{
+			Type:             channel.TypeOpenai,
+			Name:             "reload-ch-a",
+			BaseURL:          lo.ToPtr("https://api.openai.com/v1"),
+			Credentials:      objects.ChannelCredentials{APIKeys: []string{"sk-a1", "sk-a2"}},
+			SupportedModels:  []string{"gpt-4o"},
+			DefaultTestModel: "gpt-4o",
+		})
+		require.NoError(t, err)
+		_, err = svc.UpdateChannelStatus(ctx, chA.ID, channel.StatusEnabled)
+		require.NoError(t, err)
+
+		for i := range 5 {
+			chA, err = svc.UpdateChannel(ctx, chA.ID, &ent.UpdateChannelInput{
+				Credentials: &objects.ChannelCredentials{
+					APIKeys: []string{"sk-a1", fmt.Sprintf("sk-a-%d", i)},
+				},
+			})
+			require.NoError(t, err)
+		}
+
+		// Force UpdatedAt forward only minimally on SQLite; must never drift seconds into future.
+		require.Less(t, chA.UpdatedAt.Sub(time.Now().UTC()), time.Second)
+
+		_, lastUpdate, reloadedA, err := svc.reloadEnabledChannels(ctx, nil, time.Time{})
+		require.NoError(t, err)
+		require.True(t, reloadedA)
+
+		// Now update a sibling channel chB: reloadEnabledChannels must detect it rather than skipping due to future updated_at.
+		chB, err := svc.CreateChannel(ctx, ent.CreateChannelInput{
+			Type:             channel.TypeOpenai,
+			Name:             "reload-ch-b",
+			BaseURL:          lo.ToPtr("https://api.openai.com/v1"),
+			Credentials:      objects.ChannelCredentials{APIKeys: []string{"sk-b1"}},
+			SupportedModels:  []string{"gpt-4o"},
+			DefaultTestModel: "gpt-4o",
+		})
+		require.NoError(t, err)
+		_, err = svc.UpdateChannelStatus(ctx, chB.ID, channel.StatusEnabled)
+		require.NoError(t, err)
+
+		enabled, _, reloadedB, err := svc.reloadEnabledChannels(ctx, nil, lastUpdate)
+		require.NoError(t, err)
+		require.True(t, reloadedB, "sibling channel update must not be masked by another channel's future updated_at")
+		require.Len(t, enabled, 2)
+		_ = client
 	})
 
 	t.Run("concurrent DisableSelectedAPIKeys never drops an acknowledged disable", func(t *testing.T) {
@@ -584,7 +661,7 @@ func TestChannelService_UpdateChannel_ExpectedUpdatedAtAndConcurrentDisable(t *t
 		err1 := svc1.DisableSelectedAPIKeys(ctx1, ch.ID, []string{"sk-a"})
 		require.True(t, injected.Load())
 		require.NoError(t, err2)
-		require.Error(t, err1, "overlapping stale transaction must be rejected rather than overwriting sk-b")
+		require.ErrorIs(t, err1, ErrChannelUpdatedConcurrently, "overlapping stale transaction must return ErrChannelUpdatedConcurrently rather than overwriting sk-b")
 
 		after := reloadChannel(t, ctx2, client2, ch.ID)
 		require.Len(t, after.DisabledAPIKeys, 1)
@@ -595,7 +672,85 @@ func TestChannelService_UpdateChannel_ExpectedUpdatedAtAndConcurrentDisable(t *t
 		require.Empty(t, ch1Events, "rejected transaction must not emit credential disabled events")
 	})
 
-	t.Run("single-connection SQLite completes without holding process lock over DB access", func(t *testing.T) {
+	t.Run("single DisableAPIKey crossing with DisableSelectedAPIKeys retries and preserves both disables", func(t *testing.T) {
+		dsn := "file:" + filepath.Join(t.TempDir(), "single_vs_batch.db") + "?_fk=1&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+		schemaClient := enttest.NewEntClient(t, "sqlite3", dsn)
+		require.NoError(t, schemaClient.Close())
+
+		openClient := func() *ent.Client {
+			raw, err := entsql.Open("sqlite3", dsn)
+			require.NoError(t, err)
+			raw.DB().SetMaxOpenConns(2)
+			raw.DB().SetMaxIdleConns(2)
+			c := ent.NewClient(ent.Driver(raw))
+			t.Cleanup(func() { require.NoError(t, c.Close()) })
+			return c
+		}
+		client1 := openClient()
+		client2 := openClient()
+
+		ctx1 := authz.WithTestBypass(ent.NewContext(context.Background(), client1))
+		ctx2 := authz.WithTestBypass(ent.NewContext(context.Background(), client2))
+
+		svc1 := NewChannelServiceForTest(client1)
+		bus1 := events.NewBus()
+		t.Cleanup(func() { require.NoError(t, bus1.Close(context.Background())) })
+		svc1.EventBus = bus1
+		ch1Events := subscribeEvent(t, bus1, events.TypeChannelCredentialDisabled)
+
+		svc2 := NewChannelServiceForTest(client2)
+		bus2 := events.NewBus()
+		t.Cleanup(func() { require.NoError(t, bus2.Close(context.Background())) })
+		svc2.EventBus = bus2
+		ch2Events := subscribeEvent(t, bus2, events.TypeChannelCredentialDisabled)
+
+		ch, err := client1.Channel.Create().
+			SetType(channel.TypeOpenai).
+			SetName("single-vs-batch-ch").
+			SetBaseURL("https://api.openai.com/v1").
+			SetStatus(channel.StatusEnabled).
+			SetCredentials(objects.ChannelCredentials{
+				APIKeys: []string{"sk-a", "sk-b", "sk-c"},
+			}).
+			SetSupportedModels([]string{"gpt-4o"}).
+			SetDefaultTestModel("gpt-4o").
+			Save(ctx1)
+		require.NoError(t, err)
+
+		var injected atomic.Bool
+		var err2 error
+		client1.Channel.Use(func(next ent.Mutator) ent.Mutator {
+			return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+				if m.Op().Is(ent.OpUpdateOne) && injected.CompareAndSwap(false, true) {
+					// After svc1 read the empty list and before its first conditional save lands,
+					// svc2 commits DisableSelectedAPIKeys([sk-b]) on a separate connection.
+					err2 = svc2.DisableSelectedAPIKeys(ctx2, ch.ID, []string{"sk-b"})
+				}
+				return next.Mutate(ctx, m)
+			})
+		})
+
+		err1 := svc1.DisableAPIKey(ctx1, ch.ID, "sk-a", 401, "unauthorized")
+		require.True(t, injected.Load())
+		require.NoError(t, err2)
+		require.NoError(t, err1, "DisableAPIKey must retry on CAS conflict and preserve sk-b")
+
+		after := reloadChannel(t, ctx2, client2, ch.ID)
+		require.Len(t, after.DisabledAPIKeys, 2)
+		keys := map[string]bool{}
+		for _, dk := range after.DisabledAPIKeys {
+			keys[dk.Key] = true
+		}
+		require.True(t, keys["sk-a"])
+		require.True(t, keys["sk-b"])
+
+		requireEvent(t, ch2Events)
+		require.Empty(t, ch2Events)
+		requireEvent(t, ch1Events)
+		require.Empty(t, ch1Events)
+	})
+
+	t.Run("single-connection SQLite completes sequential batch disable and update cleanly", func(t *testing.T) {
 		dsn := "file:single_conn_" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()) + "?mode=memory&cache=shared&_fk=1"
 		schemaClient := enttest.NewEntClient(t, "sqlite3", dsn)
 		t.Cleanup(func() { require.NoError(t, schemaClient.Close()) })
@@ -750,26 +905,24 @@ func TestRequestService_CreateRequestExecution_ChannelAPIKeyFingerprint(t *testi
 	require.Nil(t, execOAuth.ChannelAPIKeyIndex)
 }
 
-func TestNextChannelUpdatedAt_MySQLWholeSecondPrecision(t *testing.T) {
-	futureSameSec := time.Now().UTC().Add(10 * time.Second).Truncate(time.Second).Add(950 * time.Millisecond)
-	next1 := nextChannelUpdatedAt(dialect.MySQL, futureSameSec)
-	require.Equal(t, time.UTC, next1.Location())
-	require.Equal(t, 0, next1.Nanosecond())
-	require.True(t, next1.After(futureSameSec.Truncate(time.Second)))
-	require.Equal(t, time.Second, next1.Sub(futureSameSec.Truncate(time.Second)))
-
-	next2 := nextChannelUpdatedAt(dialect.MySQL, next1)
-	require.Equal(t, 0, next2.Nanosecond())
-	require.Equal(t, time.Second, next2.Sub(next1))
-
-	past := time.Now().UTC().Add(-10 * time.Second)
-	pastNext := nextChannelUpdatedAt(dialect.MySQL, past)
-	require.Equal(t, 0, pastNext.Nanosecond())
-	require.True(t, pastNext.After(past.Truncate(time.Second)))
-
-	microPrev := time.Now().UTC().Add(10 * time.Second)
-	microNext := nextChannelUpdatedAt(dialect.SQLite, microPrev)
+func TestNextSQLiteChannelUpdatedAt_MicrosecondPrecision(t *testing.T) {
+	microPrev := time.Now().UTC().Add(50 * time.Millisecond)
+	microNext := nextSQLiteChannelUpdatedAt(microPrev)
 	require.True(t, microNext.After(microPrev))
+	require.Equal(t, time.Microsecond, microNext.Sub(microPrev))
+}
+
+type stubSQLiteCodeErr struct {
+	code int
+}
+
+func (e stubSQLiteCodeErr) Error() string { return "sqlite error" }
+func (e stubSQLiteCodeErr) Code() int     { return e.code }
+
+func TestIsSQLiteBusySnapshotError(t *testing.T) {
+	require.True(t, isSQLiteBusySnapshotError(fmt.Errorf("wrapped: %w", stubSQLiteCodeErr{code: sqliteBusySnapshot})))
+	require.False(t, isSQLiteBusySnapshotError(stubSQLiteCodeErr{code: 5}))
+	require.False(t, isSQLiteBusySnapshotError(errors.New("other error")))
 }
 
 func TestChannelService_MySQLSameSecondOptimisticLock(t *testing.T) {
@@ -817,51 +970,246 @@ func TestChannelService_MySQLSameSecondOptimisticLock(t *testing.T) {
 		Name:    "mysql-version-ch",
 		BaseURL: lo.ToPtr("https://api.openai.com/v1"),
 		Credentials: objects.ChannelCredentials{
-			APIKeys: []string{"sk-r1", "sk-r2"},
+			APIKeys: []string{"sk-r1", "sk-r2", "sk-r3"},
 		},
 		SupportedModels:  []string{"gpt-4o"},
 		DefaultTestModel: "gpt-4o",
 	})
 	require.NoError(t, err)
-	require.Equal(t, 0, created.UpdatedAt.Nanosecond())
-	loadedCreated := reloadChannel(t, ctx, client, created.ID)
-	require.True(t, loadedCreated.UpdatedAt.Equal(created.UpdatedAt))
+	v0 := objects.ChannelCredentialsVersion(created.Credentials, created.DisabledAPIKeys)
 
 	rotated, err := svc.UpdateChannel(ctx, created.ID, &ent.UpdateChannelInput{
 		Credentials: &objects.ChannelCredentials{
-			APIKeys: []string{"sk-r1", "sk-r3"},
+			APIKeys: []string{"sk-r1", "sk-r2", "sk-r4"},
 		},
 	})
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, rotated.UpdatedAt.Sub(created.UpdatedAt), time.Second)
+	v1 := objects.ChannelCredentialsVersion(rotated.Credentials, rotated.DisabledAPIKeys)
+	require.NotEqual(t, v0, v1)
+	// Rapid edits on MySQL must never push updated_at seconds into the future.
+	require.Less(t, time.Since(rotated.UpdatedAt).Abs(), 5*time.Second)
 
-	// Stale expectedUpdatedAt from the same second must still be rejected on MySQL.
+	// BulkDisableChannels writes real wall-clock updated_at in the same second; stale v0 must STILL be rejected!
+	require.NoError(t, svc.BulkDisableChannels(ctx, []int{created.ID}))
 	_, err = svc.UpdateChannel(
-		WithExpectedChannelVersion(ctx, created.UpdatedAt),
+		WithExpectedChannelCredentialsVersion(ctx, v0),
 		created.ID,
-		&ent.UpdateChannelInput{Name: lo.ToPtr("stale-rename")},
+		&ent.UpdateChannelInput{Name: lo.ToPtr("stale-after-bulk-disable")},
 	)
 	require.ErrorIs(t, err, ErrChannelUpdatedConcurrently)
 
+	// Re-submitting with v1 commits cleanly even in the same second as BulkDisableChannels.
 	renamed, err := svc.UpdateChannel(
-		WithExpectedChannelVersion(ctx, rotated.UpdatedAt),
+		WithExpectedChannelCredentialsVersion(ctx, v1),
 		created.ID,
 		&ent.UpdateChannelInput{Name: lo.ToPtr("fresh-rename")},
 	)
 	require.NoError(t, err)
-	require.True(t, renamed.UpdatedAt.After(rotated.UpdatedAt))
+	v2 := objects.ChannelCredentialsVersion(renamed.Credentials, renamed.DisabledAPIKeys)
+	require.Equal(t, v1, v2)
 
-	require.NoError(t, svc.DisableSelectedAPIKeys(ctx, created.ID, []string{"sk-r3"}))
+	// DisableSelectedAPIKeys changes DisabledAPIKeys -> invalidates v2 immediately on same second.
+	require.NoError(t, svc.DisableSelectedAPIKeys(ctx, created.ID, []string{"sk-r4"}))
 	_, err = svc.UpdateChannel(
-		WithExpectedChannelVersion(ctx, renamed.UpdatedAt),
+		WithExpectedChannelCredentialsVersion(ctx, v2),
 		created.ID,
 		&ent.UpdateChannelInput{
 			Credentials: &objects.ChannelCredentials{
-				APIKeys:     []string{"sk-r1", "sk-r3"},
+				APIKeys:     []string{"sk-r1", "sk-r2", "sk-r4"},
 				APIKeyNames: []objects.APIKeyName{{Key: "sk-r1", Name: "primary"}},
 			},
 		},
 	)
 	require.ErrorIs(t, err, ErrChannelUpdatedConcurrently)
+
+	// Concurrent DisableAPIKey + DisableSelectedAPIKeys serialize cleanly under MySQL row lock (FOR UPDATE).
+	ready := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-ready
+		errs[0] = svc.DisableAPIKey(ctx, created.ID, "sk-r2", 401, "unauthorized")
+	}()
+	go func() {
+		defer wg.Done()
+		<-ready
+		errs[1] = svc.DisableSelectedAPIKeys(ctx, created.ID, []string{"sk-r1"})
+	}()
+	close(ready)
+	wg.Wait()
+	// Note: because sk-r4 is already disabled, one of (sk-r2, sk-r1) will leave the other as the last key,
+	// or if DisableSelectedAPIKeys runs first and sees sk-r1 (leaving sk-r2), DisableAPIKey would then take
+	// the last key unless MustKeepOne prevents batch disable. Either way, no lost update or deadlock occurs.
+	require.True(t, errs[0] == nil || errs[1] == nil, "at least one concurrent disable must succeed: errs=%v", errs)
+
+	// Also verify concurrent non-exhausting disables both persist cleanly under FOR UPDATE.
+	require.NoError(t, svc.EnableAllAPIKeys(ctx, created.ID))
+	ready2 := make(chan struct{})
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-ready2
+		errs[0] = svc.DisableAPIKey(ctx, created.ID, "sk-r2", 401, "unauthorized")
+	}()
+	go func() {
+		defer wg.Done()
+		<-ready2
+		errs[1] = svc.DisableSelectedAPIKeys(ctx, created.ID, []string{"sk-r4"})
+	}()
+	close(ready2)
+	wg.Wait()
+	require.NoError(t, errs[0])
+	require.NoError(t, errs[1])
+	final := reloadChannel(t, ctx, client, created.ID)
+	require.Len(t, final.DisabledAPIKeys, 2)
+	require.Less(t, time.Since(final.UpdatedAt).Abs(), 5*time.Second)
+
+	// Commit a manual disable after quota reconciliation reads the channel but
+	// before it writes. Keep the persisted timestamp identical on both versions.
+	quotaCh, err := svc.CreateChannel(ctx, ent.CreateChannelInput{
+		Type:    channel.TypeOpencodeGo,
+		Name:    "mysql-quota-vs-batch-ch",
+		BaseURL: lo.ToPtr("https://opencode.ai/zen/go/v1"),
+		Credentials: objects.ChannelCredentials{
+			APIKeys: []string{"sk-mq1", "sk-mq2", "sk-mq3"},
+		},
+		SupportedModels:  []string{"test-model"},
+		DefaultTestModel: "test-model",
+	})
+	require.NoError(t, err)
+	quotaSnap := reloadChannel(t, ctx, client, quotaCh.ID)
+	var injected atomic.Bool
+	client.Channel.Intercept(ent.InterceptFunc(func(next ent.Querier) ent.Querier {
+		return ent.QuerierFunc(func(queryCtx context.Context, query ent.Query) (ent.Value, error) {
+			value, err := next.Query(queryCtx, query)
+			if err != nil || !injected.CompareAndSwap(false, true) {
+				return value, err
+			}
+			err = svc.RunInTransaction(ctx, func(txCtx context.Context) error {
+				if err := svc.DisableSelectedAPIKeys(WithSerialChannelKeyTransaction(txCtx), quotaCh.ID, []string{"sk-mq1"}); err != nil {
+					return err
+				}
+				return ent.FromContext(txCtx).Channel.UpdateOneID(quotaCh.ID).SetUpdatedAt(quotaSnap.UpdatedAt).Exec(txCtx)
+			})
+			return value, err
+		})
+	}))
+	_, quotaErr := svc.ReconcileQuotaKeys(ctx, quotaSnap, []provider_quota.APIKeyQuota{
+		{Key: "sk-mq2", Data: provider_quota.QuotaData{Status: "exhausted"}},
+	})
+	require.True(t, injected.Load())
+	require.ErrorIs(t, quotaErr, errQuotaKeySnapshotStale)
+	afterQuota := reloadChannel(t, ctx, client, quotaCh.ID)
+	manualFound := false
+	for _, dk := range afterQuota.DisabledAPIKeys {
+		if dk.Key == "sk-mq1" && !dk.QuotaDisabled {
+			manualFound = true
+		}
+	}
+	require.True(t, manualFound, "same-second ReconcileQuotaKeys must never overwrite committed DisableSelectedAPIKeys")
 }
 
+func TestChannelService_DisableAPIKey_LastKeyExhaustionInOuterTxReloadsCache(t *testing.T) {
+	svc, client, ctx := setupChannelNamesBizTest(t)
+	svc.enabledChannelsCache.Stop()
+	svc.enabledChannelsCache = live.NewCache(live.Options[[]*Channel]{
+		Name:            "test_exhausted_channel",
+		RefreshInterval: time.Hour,
+		RefreshFunc:     svc.onCacheRefreshed,
+	})
+	t.Cleanup(svc.enabledChannelsCache.Stop)
+
+	ch, err := client.Channel.Create().
+		SetType(channel.TypeOpenai).
+		SetName("outer-tx-last-key").
+		SetBaseURL("https://api.openai.com/v1").
+		SetStatus(channel.StatusEnabled).
+		SetCredentials(objects.ChannelCredentials{
+			APIKeys: []string{"sk-only-last"},
+		}).
+		SetSupportedModels([]string{"gpt-4o"}).
+		SetDefaultTestModel("gpt-4o").
+		Save(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.enabledChannelsCache.Load(ctx, true))
+	require.NotNil(t, svc.GetEnabledChannel(ch.ID))
+
+	err = svc.RunInTransaction(ctx, func(txCtx context.Context) error {
+		return svc.DisableAPIKey(txCtx, ch.ID, "sk-only-last", 401, "unauthorized")
+	})
+	require.NoError(t, err)
+
+	// Post-commit synchronous cache reload must detach from the committed outer tx and evict the exhausted channel immediately.
+	require.Nil(t, svc.GetEnabledChannel(ch.ID))
+	reloaded := reloadChannel(t, ctx, client, ch.ID)
+	require.Equal(t, channel.StatusDisabled, reloaded.Status)
+}
+
+func TestChannelService_DisableSelectedAPIKeys_ConcurrentQuotaReconcile(t *testing.T) {
+	dsn := "file:" + filepath.Join(t.TempDir(), "batch_vs_quota.db") + "?_fk=1&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	schemaClient := enttest.NewEntClient(t, "sqlite3", dsn)
+	require.NoError(t, schemaClient.Close())
+
+	raw, err := entsql.Open("sqlite3", dsn)
+	require.NoError(t, err)
+	raw.DB().SetMaxOpenConns(2)
+	raw.DB().SetMaxIdleConns(2)
+	client := ent.NewClient(ent.Driver(raw))
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+
+	ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
+	svc := NewChannelServiceForTest(client)
+
+	ch, err := client.Channel.Create().
+		SetType(channel.TypeOpencodeGo).
+		SetName("batch-vs-quota-ch").
+		SetBaseURL("https://opencode.ai/zen/go/v1").
+		SetStatus(channel.StatusEnabled).
+		SetCredentials(objects.ChannelCredentials{
+			APIKeys: []string{"sk-q1", "sk-q2", "sk-q3"},
+		}).
+		SetSupportedModels([]string{"test-model"}).
+		SetDefaultTestModel("test-model").
+		Save(ctx)
+	require.NoError(t, err)
+
+	snapshot := reloadChannel(t, ctx, client, ch.ID)
+	ready := make(chan struct{})
+	var wg sync.WaitGroup
+	var batchErr, quotaErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-ready
+		batchErr = svc.DisableSelectedAPIKeys(ctx, ch.ID, []string{"sk-q1"})
+	}()
+	go func() {
+		defer wg.Done()
+		<-ready
+		_, quotaErr = svc.ReconcileQuotaKeys(ctx, snapshot, []provider_quota.APIKeyQuota{
+			{Key: "sk-q2", Data: provider_quota.QuotaData{Status: "exhausted"}},
+		})
+	}()
+	close(ready)
+	wg.Wait()
+
+	if errors.Is(batchErr, ErrChannelUpdatedConcurrently) {
+		batchErr = svc.DisableSelectedAPIKeys(ctx, ch.ID, []string{"sk-q1"})
+	}
+	require.NoError(t, batchErr)
+	if quotaErr != nil {
+		require.ErrorIs(t, quotaErr, errQuotaKeySnapshotStale)
+	}
+
+	after := reloadChannel(t, ctx, client, ch.ID)
+	manualFound := false
+	for _, dk := range after.DisabledAPIKeys {
+		if dk.Key == "sk-q1" && !dk.QuotaDisabled {
+			manualFound = true
+		}
+	}
+	require.True(t, manualFound, "ReconcileQuotaKeys must never overwrite manual DisableSelectedAPIKeys")
+}

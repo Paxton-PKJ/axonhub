@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/contexts"
@@ -118,6 +117,15 @@ func (r *channelResolver) DisabledAPIKeys(ctx context.Context, obj *ent.Channel)
 	return lo.ToSlicePtr(obj.DisabledAPIKeys), nil
 }
 
+// CredentialsVersion is the resolver for the credentialsVersion field.
+func (r *channelResolver) CredentialsVersion(ctx context.Context, obj *ent.Channel) (*string, error) {
+	if obj == nil || !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return nil, nil
+	}
+
+	return lo.ToPtr(objects.ChannelCredentialsVersion(obj.Credentials, obj.DisabledAPIKeys)), nil
+}
+
 // LiveLimiterStats is the resolver for the liveLimiterStats field.
 func (r *channelResolver) LiveLimiterStats(ctx context.Context, obj *ent.Channel) (*ChannelLimiterStats, error) {
 	if r.channelLimiterManager == nil || obj == nil {
@@ -213,9 +221,9 @@ func (r *mutationResolver) BulkCreateChannels(ctx context.Context, input biz.Bul
 }
 
 // UpdateChannel is the resolver for the updateChannel field.
-func (r *mutationResolver) UpdateChannel(ctx context.Context, id objects.GUID, input ent.UpdateChannelInput, apiKeyStateChanges *biz.ChannelAPIKeyStateChanges, expectedUpdatedAt *time.Time) (*ent.Channel, error) {
-	if expectedUpdatedAt != nil {
-		ctx = biz.WithExpectedChannelVersion(ctx, *expectedUpdatedAt)
+func (r *mutationResolver) UpdateChannel(ctx context.Context, id objects.GUID, input ent.UpdateChannelInput, apiKeyStateChanges *biz.ChannelAPIKeyStateChanges, expectedCredentialsVersion *string) (*ent.Channel, error) {
+	if expectedCredentialsVersion != nil {
+		ctx = biz.WithExpectedChannelCredentialsVersion(ctx, *expectedCredentialsVersion)
 	}
 	return r.channelService.UpdateChannel(ctx, id.ID, &input, apiKeyStateChanges)
 }

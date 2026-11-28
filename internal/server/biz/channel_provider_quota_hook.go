@@ -72,7 +72,7 @@ func (svc *ChannelService) invalidateProviderQuota(ctx context.Context, channelI
 	// Reload and release through the live client on a context detached from
 	// that transaction, keeping the cancellation behavior runAfterCommit
 	// provides.
-	liveCtx := ent.NewContext(context.WithoutCancel(ctx), svc.db)
+	liveCtx := ent.NewContext(ent.NewTxContext(context.WithoutCancel(ctx), nil), svc.db)
 	ch, err := svc.db.Channel.Get(liveCtx, channelID)
 	if err != nil {
 		log.Warn(ctx, "failed to load channel for quota key release after provider change",

@@ -26,6 +26,8 @@ import (
 	"slices"
 	"time"
 
+	"entgo.io/ent/dialect"
+
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/log"
@@ -164,56 +166,84 @@ func (svc *ChannelService) ReconcileQuotaKeys(
 		return ch, nil
 	}
 
-	update := entClient.Channel.Update().
-		Where(channel.IDEQ(ch.ID), channel.UpdatedAtEQ(ch.UpdatedAt)).
-		SetDisabledAPIKeys(result.keys)
-
 	autoDisabled := false
 	recovered := false
+	isMySQL := entClient.Driver().Dialect() == dialect.MySQL
+	save := func(writeCtx context.Context) error {
+		db := svc.entFromContext(writeCtx)
+		if isMySQL {
+			// A same-second key change can leave updated_at unchanged on MySQL.
+			// Compare the actual inputs while holding the manual writer's row lock.
+			current, err := loadChannelForCredentialUpdate(writeCtx, db, ch.ID)
+			if err != nil {
+				return err
+			}
+			expected := objects.ChannelCredentialsVersion(ch.Credentials, ch.DisabledAPIKeys)
+			actual := objects.ChannelCredentialsVersion(current.Credentials, current.DisabledAPIKeys)
+			if expected != actual || current.Type != ch.Type || current.BaseURL != ch.BaseURL || current.Status != ch.Status {
+				return fmt.Errorf("%w (channel %d)", errQuotaKeySnapshotStale, ch.ID)
+			}
+		}
+		update := db.Channel.Update().
+			Where(channel.IDEQ(ch.ID), channel.UpdatedAtEQ(ch.UpdatedAt)).
+			SetDisabledAPIKeys(result.keys)
 
-	switch {
-	case result.leavesEmpty:
-		// Zero enabled credentials reuses the existing all-keys bookkeeping, so
-		// the channel disappears from the serving cache exactly as it does when
-		// the last key is disabled by hand. The auto-disable markers may only
-		// be applied when the channel was serving or is already auto-disabled:
-		// a manually disabled channel keeps its status, its error message and a
-		// nil AutoDisabledAt, exactly as DisableAPIKey does, so a later
-		// recovery cannot resurrect it. A scheduled disable is owned by its
-		// schedule until the stored re-enable expiry, so it is never taken over
-		// (doing so would clear the planned downtime), exactly as DisableAPIKey
-		// does.
-		if !channelIsAllKeysDisabled(ch) &&
-			!isScheduledAutoDisabled(ch) &&
-			(ch.Status == channel.StatusEnabled || ch.AutoDisabledAt != nil) {
-			autoDisabled = true
+		switch {
+		case result.leavesEmpty:
+			// Zero enabled credentials reuses the existing all-keys bookkeeping, so
+			// the channel disappears from the serving cache exactly as it does when
+			// the last key is disabled by hand. The auto-disable markers may only
+			// be applied when the channel was serving or is already auto-disabled:
+			// a manually disabled channel keeps its status, its error message and a
+			// nil AutoDisabledAt, exactly as DisableAPIKey does, so a later
+			// recovery cannot resurrect it. A scheduled disable is owned by its
+			// schedule until the stored re-enable expiry, so it is never taken over
+			// (doing so would clear the planned downtime), exactly as DisableAPIKey
+			// does.
+			if !channelIsAllKeysDisabled(ch) &&
+				!isScheduledAutoDisabled(ch) &&
+				(ch.Status == channel.StatusEnabled || ch.AutoDisabledAt != nil) {
+				autoDisabled = true
+				update = update.
+					SetStatus(channel.StatusDisabled).
+					SetErrorMessage(fmt.Sprintf("%s (last error: %d)", allKeysDisabledErrorPrefix, 0)).
+					SetAutoDisabledAt(now).
+					ClearAutoDisableExpiresAt()
+			}
+		case channelIsAllKeysDisabled(ch):
+			recovered = true
 			update = update.
-				SetStatus(channel.StatusDisabled).
-				SetErrorMessage(fmt.Sprintf("%s (last error: %d)", allKeysDisabledErrorPrefix, 0)).
-				SetAutoDisabledAt(now).
+				SetStatus(channel.StatusEnabled).
+				ClearErrorMessage().
+				ClearAutoDisabledAt().
 				ClearAutoDisableExpiresAt()
 		}
-	case channelIsAllKeysDisabled(ch):
-		recovered = true
-		update = update.
-			SetStatus(channel.StatusEnabled).
-			ClearErrorMessage().
-			ClearAutoDisabledAt().
-			ClearAutoDisableExpiresAt()
-	}
 
-	// The compare-and-set predicate keeps this writer from overwriting a
-	// concurrent manual disable or channel edit: a lost race writes nothing and
-	// the next poll reconciles from the current state.
-	affected, err := update.Save(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to reconcile quota key disables: %w", err)
+		// The compare-and-set predicate keeps this writer from overwriting a
+		// concurrent manual disable or channel edit: a lost race writes nothing and
+		// the next poll reconciles from the current state.
+		affected, err := update.Save(writeCtx)
+		if err != nil {
+			return fmt.Errorf("failed to reconcile quota key disables: %w", err)
+		}
+		if affected == 0 {
+			// A concurrent edit won the row: this observation no longer describes
+			// the stored channel, so the caller must not persist it either. The
+			// next poll reconciles from the current state.
+			return fmt.Errorf("%w (channel %d): the channel changed during reconciliation", errQuotaKeySnapshotStale, ch.ID)
+		}
+		return nil
 	}
-	if affected == 0 {
-		// A concurrent edit won the row: this observation no longer describes
-		// the stored channel, so the caller must not persist it either. The
-		// next poll reconciles from the current state.
-		return ch, fmt.Errorf("%w (channel %d): the channel changed during reconciliation", errQuotaKeySnapshotStale, ch.ID)
+	if isMySQL {
+		err = svc.RunInTransaction(ctx, save)
+	} else {
+		err = save(ctx)
+	}
+	if err != nil {
+		if errors.Is(err, errQuotaKeySnapshotStale) {
+			return ch, err
+		}
+		return nil, err
 	}
 
 	eventStatus := ch.Status

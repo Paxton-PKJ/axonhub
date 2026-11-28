@@ -227,8 +227,26 @@ func (t operationTransactions) MutateOperationContext(ctx context.Context, oc *g
 }
 
 func (t operationTransactions) InterceptResponse(ctx context.Context, next graphql.ResponseHandler) *graphql.Response {
-	if skipGraphqlTransaction(graphql.GetOperationContext(ctx)) {
+	oc := graphql.GetOperationContext(ctx)
+	if skipGraphqlTransaction(oc) {
 		return next(ctx)
+	}
+	for _, field := range graphql.CollectFields(oc, oc.Operation.SelectionSet, []string{"Mutation"}) {
+		switch field.Name {
+		case "disableSelectedChannelAPIKeys":
+		case "updateChannel":
+			args := field.ArgumentMap(oc.Variables)
+			if args["apiKeyStateChanges"] == nil && args["expectedCredentialsVersion"] == nil {
+				continue
+			}
+		default:
+			continue
+		}
+		// Transactioner serializes resolvers sharing this transaction. Key writes
+		// use the database's concurrency guard without waiting on a Go mutex.
+		return t.Transactioner.InterceptResponse(ctx, func(txCtx context.Context) *graphql.Response {
+			return next(biz.WithSerialChannelKeyTransaction(txCtx))
+		})
 	}
 	return t.Transactioner.InterceptResponse(ctx, next)
 }

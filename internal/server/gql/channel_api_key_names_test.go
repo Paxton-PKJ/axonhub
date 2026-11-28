@@ -32,6 +32,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/schema"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/looplj/axonhub/internal/authz"
@@ -226,12 +227,20 @@ func TestChannelResolver_Credentials_APIKeyNamesAndScopes(t *testing.T) {
 	noWriteCreds, err := channelRes.Credentials(readOnlyCtx, ch)
 	require.NoError(t, err)
 	require.Nil(t, noWriteCreds)
+	noWriteVer, err := channelRes.CredentialsVersion(readOnlyCtx, ch)
+	require.NoError(t, err)
+	require.Nil(t, noWriteVer)
 
 	writeCtx := vertexCredentialsContext(t, ctx, client)
 	creds, err := channelRes.Credentials(writeCtx, ch)
 	require.NoError(t, err)
 	require.NotNil(t, creds)
 	require.Equal(t, []objects.APIKeyName{{Key: "sk-live-1111", Name: "primary"}}, creds.APIKeyNames)
+	writeVer, err := channelRes.CredentialsVersion(writeCtx, ch)
+	require.NoError(t, err)
+	require.NotNil(t, writeVer)
+	require.Len(t, *writeVer, 64)
+	require.Equal(t, objects.ChannelCredentialsVersion(ch.Credentials, ch.DisabledAPIKeys), *writeVer)
 
 	oauthCreds, err := channelRes.Credentials(writeCtx, oauthCh)
 	require.NoError(t, err)
@@ -793,21 +802,23 @@ func TestChannelAPIKeyStateMutations_HTTPGraphQLAndDebugLogRedaction(t *testing.
 	disableAllResp := post(
 		`fragment DisSel on Mutation { disAlias: disableSelectedChannelAPIKeys(channelID: $id, keys: $customSecretList) }
 		mutation($id: ID!, $customSecretList: [String!]!) { ...DisSel }`,
-		map[string]any{"id": chGUID, "customSecretList": []string{customVarKey1, secretKey2}},
+		map[string]any{"id": chGUID, "customSecretList": []string{customVarKey1, secretKey1, secretKey2}},
 	)
-	errs := disableAllResp["errors"].([]any)
-	require.NotEmpty(t, errs)
-
-	// Also verify the real key pair returns MUST_KEEP_ONE_ENABLED_API_KEY.
-	disableRealAllResp := post(
-		`mutation($id: ID!, $customSecretList: [String!]!) { disableSelectedChannelAPIKeys(channelID: $id, keys: $customSecretList) }`,
-		map[string]any{"id": chGUID, "customSecretList": []string{secretKey1, secretKey2}},
-	)
-	errs = disableRealAllResp["errors"].([]any)
+	errs, ok := disableAllResp["errors"].([]any)
+	require.True(t, ok, "expected GraphQL errors, got: %#v", disableAllResp)
 	require.NotEmpty(t, errs)
 	errMap := errs[0].(map[string]any)
 	ext := errMap["extensions"].(map[string]any)
 	require.Equal(t, "MUST_KEEP_ONE_ENABLED_API_KEY", ext["code"])
+
+	// Unknown key alone is ignored without error or persistence, and its value is redacted from logs.
+	disableUnknownResp := post(
+		`mutation($id: ID!, $customSecretList: [String!]!) { disableSelectedChannelAPIKeys(channelID: $id, keys: $customSecretList) }`,
+		map[string]any{"id": chGUID, "customSecretList": []string{customVarKey1}},
+	)
+	require.Empty(t, disableUnknownResp["errors"])
+	require.Equal(t, true, disableUnknownResp["data"].(map[string]any)["disableSelectedChannelAPIKeys"])
+	require.Empty(t, db.Channel.GetX(setupCtx, ch.ID).DisabledAPIKeys)
 
 	// 2. Succeeding disableSelectedChannelAPIKeys.
 	disableOneResp := post(
@@ -867,11 +878,11 @@ func TestChannelAPIKeyStateMutations_HTTPGraphQLAndDebugLogRedaction(t *testing.
 	require.Len(t, reloaded.DisabledAPIKeys, 1)
 	require.Equal(t, redactedUpdateKey2, reloaded.DisabledAPIKeys[0].Key)
 
-	// 3b. Stale expectedUpdatedAt rejects overwrite and returns CHANNEL_UPDATED_CONCURRENTLY; fresh expectedUpdatedAt succeeds.
-	staleTimestamp := reloaded.UpdatedAt.Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	// 3b. Stale expectedCredentialsVersion rejects overwrite and returns CHANNEL_UPDATED_CONCURRENTLY; fresh expectedCredentialsVersion succeeds.
+	staleVersion := objects.ChannelCredentialsVersion(objects.ChannelCredentials{APIKeys: []string{"sk-stale"}}, nil)
 	staleUpdateResp := post(
-		`mutation($id: ID!, $input: UpdateChannelInput!, $expectedUpdatedAt: Time) {
-			updateChannel(id: $id, input: $input, expectedUpdatedAt: $expectedUpdatedAt) { id updatedAt }
+		`mutation($id: ID!, $input: UpdateChannelInput!, $expectedCredentialsVersion: String) {
+			updateChannel(id: $id, input: $input, expectedCredentialsVersion: $expectedCredentialsVersion) { id credentialsVersion }
 		}`,
 		map[string]any{
 			"id": chGUID,
@@ -880,7 +891,7 @@ func TestChannelAPIKeyStateMutations_HTTPGraphQLAndDebugLogRedaction(t *testing.
 					"apiKeys": []string{"sk-stale-overwrite-should-not-stick"},
 				},
 			},
-			"expectedUpdatedAt": staleTimestamp,
+			"expectedCredentialsVersion": staleVersion,
 		},
 	)
 	staleErrs := staleUpdateResp["errors"].([]any)
@@ -889,11 +900,12 @@ func TestChannelAPIKeyStateMutations_HTTPGraphQLAndDebugLogRedaction(t *testing.
 	afterStale := db.Channel.GetX(setupCtx, ch.ID)
 	require.Equal(t, []string{redactedUpdateKey1, redactedUpdateKey2}, afterStale.Credentials.APIKeys)
 
+	freshVersion := objects.ChannelCredentialsVersion(afterStale.Credentials, afterStale.DisabledAPIKeys)
 	freshUpdateResp := post(
-		`mutation($id: ID!, $input: UpdateChannelInput!, $expectedUpdatedAt: Time) {
-			updateChannel(id: $id, input: $input, expectedUpdatedAt: $expectedUpdatedAt) {
+		`mutation($id: ID!, $input: UpdateChannelInput!, $expectedCredentialsVersion: String) {
+			updateChannel(id: $id, input: $input, expectedCredentialsVersion: $expectedCredentialsVersion) {
 				id
-				updatedAt
+				credentialsVersion
 				credentials { apiKeyNames { key name } }
 			}
 		}`,
@@ -905,10 +917,14 @@ func TestChannelAPIKeyStateMutations_HTTPGraphQLAndDebugLogRedaction(t *testing.
 					"apiKeyNames": []map[string]any{{"key": redactedUpdateKey1, "name": "fresh-name"}},
 				},
 			},
-			"expectedUpdatedAt": afterStale.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			"expectedCredentialsVersion": freshVersion,
 		},
 	)
 	require.Empty(t, freshUpdateResp["errors"])
+	freshData := freshUpdateResp["data"].(map[string]any)["updateChannel"].(map[string]any)
+	returnedVersion, ok := freshData["credentialsVersion"].(string)
+	require.True(t, ok)
+	require.NotEqual(t, freshVersion, returnedVersion)
 	require.Equal(t, "fresh-name", db.Channel.GetX(setupCtx, ch.ID).Credentials.NameOf(redactedUpdateKey1))
 
 	// 3c. Malformed GraphQL request containing an inline secret string must never leak to debug log or AccessLog.
@@ -1012,4 +1028,135 @@ func TestRequestCache_ClonesChannelForConcurrentPoliciesResolution(t *testing.T)
 		require.NotSame(t, shared, channels[i])
 		require.Equal(t, objects.CapabilityPolicyUnlimited, results[i].Stream)
 	}
+}
+
+func TestGraphQL_CombinedDisableSelectedAndSingleAPIKeyMutation(t *testing.T) {
+	dsn := "file:" + filepath.Join(t.TempDir(), "combined_disable.db") + "?_fk=1&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	db := enttest.NewEntClient(t, "sqlite3", dsn)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	setupCtx := authz.WithTestBypass(ent.NewContext(context.Background(), db))
+	owner, err := db.User.Create().
+		SetEmail("owner-combined-disable@example.com").
+		SetPassword("pw").
+		SetFirstName("Owner").
+		SetLastName("Combined").
+		SetStatus(user.StatusActivated).
+		SetIsOwner(true).
+		SetScopes([]string{string(scopes.ScopeWriteChannels), string(scopes.ScopeReadChannels)}).
+		Save(setupCtx)
+	require.NoError(t, err)
+
+	ch, err := db.Channel.Create().
+		SetType(channel.TypeOpenai).
+		SetName("combined-disable-ch").
+		SetBaseURL("https://api.openai.com/v1").
+		SetStatus(channel.StatusEnabled).
+		SetCredentials(objects.ChannelCredentials{
+			APIKeys: []string{"sk-comb-1", "sk-comb-2", "sk-comb-3", "sk-comb-4"},
+		}).
+		SetSupportedModels([]string{"gpt-4o"}).
+		SetDefaultTestModel("gpt-4o").
+		Save(setupCtx)
+	require.NoError(t, err)
+
+	chSvc := biz.NewChannelServiceForTest(db)
+	handler := NewGraphqlHandlers(Dependencies{
+		Ent:            db,
+		ChannelService: chSvc,
+	})
+	chGUID := fmt.Sprintf("gid://axonhub/%s/%d", ent.TypeChannel, ch.ID)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	requestBody := func(query string, variables map[string]any) []byte {
+		body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
+		require.NoError(t, err)
+		return body
+	}
+	post := func(body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/admin/graphql", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		uCtx := contexts.WithUser(authz.NewUserContext(ent.NewContext(req.Context(), db), owner.ID), owner)
+		rec := httptest.NewRecorder()
+		handler.Graphql.ServeHTTP(rec, req.WithContext(uCtx))
+		return rec
+	}
+
+	// The first field would succeed alone. A failing sibling must roll it back.
+	failed := post(requestBody(`mutation($id: ID!) {
+		edit: updateChannel(id: $id, input: {name: "rolled-back-name"}) { id }
+		a: disableSelectedChannelAPIKeys(channelID: $id, keys: ["sk-comb-1"])
+		b: disableSelectedChannelAPIKeys(channelID: $id, keys: ["sk-comb-2", "sk-comb-3", "sk-comb-4"])
+	}`, map[string]any{"id": chGUID}))
+	require.Equal(t, http.StatusOK, failed.Code, failed.Body.String())
+	require.Contains(t, failed.Body.String(), "MUST_KEEP_ONE_ENABLED_API_KEY")
+	afterRollback := db.Channel.GetX(setupCtx, ch.ID)
+	require.Equal(t, ch.Name, afterRollback.Name)
+	require.Empty(t, afterRollback.DisabledAPIKeys)
+
+	combined := requestBody(`fragment BatchDis on Mutation {
+		a: disableSelectedChannelAPIKeys(channelID: $id, keys: $keys)
+	}
+	mutation($id: ID!, $keys: [String!]!, $single: String!) {
+		...BatchDis
+		b: disableChannelAPIKey(channelID: $id, key: $single)
+	}`, map[string]any{"id": chGUID, "keys": []string{"sk-comb-1"}, "single": "sk-comb-2"})
+	single := requestBody(`mutation($id: ID!) {
+		c: disableChannelAPIKey(channelID: $id, key: "sk-comb-3")
+	}`, map[string]any{"id": chGUID})
+
+	// Hold the first request at its batch write until the second real GraphQL
+	// request is waiting for the same single-connection pool.
+	atWrite, resume := make(chan struct{}), make(chan struct{})
+	db.Channel.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(writeCtx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op() == ent.OpUpdate {
+				close(atWrite)
+				select {
+				case <-resume:
+				case <-writeCtx.Done():
+					return nil, writeCtx.Err()
+				}
+			}
+			return next.Mutate(writeCtx, m)
+		})
+	})
+	pool := db.Driver().(*entsql.Driver).DB()
+	var combinedResp, singleResp *httptest.ResponseRecorder
+	var wg sync.WaitGroup
+	wg.Go(func() { combinedResp = post(combined) })
+	select {
+	case <-atWrite:
+	case <-ctx.Done():
+		t.Fatal("combined mutation did not reach the batch write")
+	}
+	before := pool.Stats().WaitCount
+	wg.Go(func() { singleResp = post(single) })
+	assert.Eventually(t, func() bool { return pool.Stats().WaitCount > before }, 5*time.Second, time.Millisecond)
+	close(resume)
+	wg.Wait()
+	for _, response := range []*httptest.ResponseRecorder{combinedResp, singleResp} {
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		var result struct {
+			Data   map[string]bool
+			Errors []json.RawMessage
+		}
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+		require.Empty(t, result.Errors, response.Body.String())
+		require.NotEmpty(t, result.Data)
+		for _, success := range result.Data {
+			require.True(t, success)
+		}
+	}
+
+	reloaded := db.Channel.GetX(setupCtx, ch.ID)
+	require.Len(t, reloaded.DisabledAPIKeys, 3)
+	disabledSet := map[string]bool{}
+	for _, dk := range reloaded.DisabledAPIKeys {
+		disabledSet[dk.Key] = true
+	}
+	require.True(t, disabledSet["sk-comb-1"])
+	require.True(t, disabledSet["sk-comb-2"])
+	require.True(t, disabledSet["sk-comb-3"])
 }

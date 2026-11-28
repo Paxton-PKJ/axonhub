@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/aptible/supercronic/cronexpr"
 	"github.com/samber/lo"
 	"go.uber.org/fx"
@@ -708,12 +709,6 @@ func (svc *ChannelService) createChannel(ctx context.Context, input ent.CreateCh
 		createBuilder.SetPolicies(*input.Policies)
 	}
 
-	if db.Driver().Dialect() == dialect.MySQL {
-		// MySQL TIMESTAMP stores whole seconds and rounds >=500ms upward;
-		// truncate on insert so the returned UpdatedAt matches the persisted value.
-		createBuilder.SetUpdatedAt(xtime.UTCNow().Truncate(time.Second))
-	}
-
 	channel, err := createBuilder.Save(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create channel: %w", err)
@@ -954,32 +949,66 @@ func normalizeAutoDisableRules(rules []objects.APIKeyAutoDisableRule, allowDelet
 	return normalized, nil
 }
 
-// nextChannelUpdatedAt guarantees a strictly newer updated_at timestamp at the
-// storage precision of the active SQL dialect (whole seconds on MySQL TIMESTAMP,
-// microseconds on SQLite/PostgreSQL) so rapid sequential or concurrent
-// optimistic-locked writes never collide on the same clock tick.
-func nextChannelUpdatedAt(dialectName string, prev time.Time) time.Time {
-	now := xtime.UTCNow()
-	if dialectName == dialect.MySQL {
-		prevSec := prev.UTC().Truncate(time.Second)
-		nowSec := now.Truncate(time.Second)
-		if !nowSec.After(prevSec) {
-			return prevSec.Add(time.Second)
-		}
-		return nowSec
+// maxChannelVersionRetryAttempts bounds optimistic-lock CAS retries on single-channel
+// status/API-key updates.
+const maxChannelVersionRetryAttempts = 8
+
+// sqliteBusySnapshot is SQLite's extended result code SQLITE_BUSY_SNAPSHOT (5 | (2 << 8)).
+// In WAL mode, a transaction that took a read snapshot and then attempts to upgrade
+// to a writer after another connection committed returns this code immediately.
+const sqliteBusySnapshot = 517
+
+type sqliteCodedError interface {
+	Code() int
+}
+
+func isSQLiteBusySnapshotError(err error) bool {
+	var coded sqliteCodedError
+	return errors.As(err, &coded) && coded.Code() == sqliteBusySnapshot
+}
+
+type channelExpectedCredentialsVersionKey struct{}
+
+// WithExpectedChannelCredentialsVersion returns a context whose credential-level
+// channel update is optimistic-locked against objects.ChannelCredentialsVersion of
+// the channel's persisted credentials and disabled API keys.
+func WithExpectedChannelCredentialsVersion(ctx context.Context, version string) context.Context {
+	return context.WithValue(ctx, channelExpectedCredentialsVersionKey{}, version)
+}
+
+func expectedChannelCredentialsVersionFromContext(ctx context.Context) (string, bool) {
+	version, ok := ctx.Value(channelExpectedCredentialsVersionKey{}).(string)
+	return version, ok
+}
+
+// loadChannelForCredentialUpdate loads the target channel row, acquiring a row-level
+// FOR UPDATE lock on dialects that support it so concurrent read-modify-write
+// credential operations see committed changes rather than a stale RR snapshot.
+func loadChannelForCredentialUpdate(ctx context.Context, db *ent.Client, id int) (*ent.Channel, error) {
+	query := db.Channel.Query().Where(channel.IDEQ(id))
+	if db.Driver().Dialect() != dialect.SQLite {
+		query.Modify(func(s *entsql.Selector) {
+			s.ForUpdate()
+		})
 	}
+	return query.Only(ctx)
+}
+
+// nextSQLiteChannelUpdatedAt guarantees a strictly newer microsecond updated_at
+// timestamp on SQLite so sub-microsecond CAS updates never collide on the same tick.
+func nextSQLiteChannelUpdatedAt(prev time.Time) time.Time {
+	now := xtime.UTCNow()
 	if !now.Truncate(time.Microsecond).After(prev.Truncate(time.Microsecond)) {
 		return prev.Add(time.Microsecond)
 	}
 	return now
 }
 
-// UpdateChannel updates a channel with the provided input. Callers that
-// merge patches onto a previously read snapshot (see UpdateChannelSettings)
-// can carry the snapshot's version in the context via withChannelExpectedVersion;
-// the update is then optimistic-locked against that version and fails with
-// ErrChannelUpdatedConcurrently when the channel was updated concurrently.
 // UpdateChannel updates an existing channel and optionally applies atomic API key enable/disable changes.
+// Callers that merge settings patches onto a previously read snapshot (see UpdateChannelSettings) can carry
+// the snapshot's UpdatedAt via withChannelExpectedVersion, and callers submitting credential/key-state
+// drafts can carry objects.ChannelCredentialsVersion via WithExpectedChannelCredentialsVersion; either
+// fails with ErrChannelUpdatedConcurrently if the guarded state changed concurrently.
 func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent.UpdateChannelInput, apiKeyStateChanges ...*ChannelAPIKeyStateChanges) (*ent.Channel, error) {
 	// Reject Realtime before provider normalization can discard submitted endpoints.
 	if slices.ContainsFunc(input.Endpoints, func(endpoint objects.ChannelEndpoint) bool {
@@ -994,6 +1023,17 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 	}
 	log.Debug(ctx, "UpdateChannel", log.Int("id", id))
 	expectedUpdatedAt, _ := ctx.Value(channelExpectedVersionKey{}).(*time.Time)
+	expectedCredentialsVersion, hasExpectedCredentialsVersion := expectedChannelCredentialsVersionFromContext(ctx)
+	var stateChanges *ChannelAPIKeyStateChanges
+	for _, changes := range apiKeyStateChanges {
+		if changes.HasChanges() {
+			stateChanges = changes
+			break
+		}
+	}
+	if (stateChanges != nil || hasExpectedCredentialsVersion) && !canWriteChannelKeyState(ctx) {
+		return nil, xerrors.ForbiddenError("permission denied: requires write_channels scope")
+	}
 	// Snapshot the provider identity before normalizing Command Code settings.
 	// Settings-only updates need this snapshot to reject a concurrent type
 	// change that could otherwise leave a quota cookie on the wrong channel.
@@ -1204,15 +1244,7 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 		}
 	}
 
-	var stateChanges *ChannelAPIKeyStateChanges
-	for _, changes := range apiKeyStateChanges {
-		if changes.HasChanges() {
-			stateChanges = changes
-			break
-		}
-	}
-
-	needsAPIKeyLock := input.Credentials != nil && stateChanges == nil && expectedUpdatedAt == nil
+	needsAPIKeyLock := input.Credentials != nil && stateChanges == nil && !hasExpectedCredentialsVersion && !inSerialChannelKeyTransaction(ctx)
 	apiKeyLockHeld := false
 	if needsAPIKeyLock {
 		svc.apiKeyOpsLock.Lock()
@@ -1280,16 +1312,16 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 		}
 
 		var existingUpdatedAt *time.Time
-		if input.Credentials != nil || input.Type != nil || stateChanges != nil {
+		if input.Credentials != nil || input.Type != nil || stateChanges != nil || hasExpectedCredentialsVersion {
 			existing, err := authz.RunWithScopeDecision(ctx, scopes.ScopeWriteChannels, func(queryCtx context.Context) (*ent.Channel, error) {
-				return db.Channel.Query().
-					Where(channel.IDEQ(id)).
-					Select(channel.FieldID, channel.FieldType, channel.FieldBaseURL, channel.FieldCredentials, channel.FieldDisabledAPIKeys,
-						channel.FieldStatus, channel.FieldErrorMessage, channel.FieldAutoDisabledAt, channel.FieldName, channel.FieldUpdatedAt).
-					Only(queryCtx)
+				return loadChannelForCredentialUpdate(queryCtx, db, id)
 			})
 			if err != nil {
 				return fmt.Errorf("failed to load existing channel credentials: %w", err)
+			}
+			if hasExpectedCredentialsVersion &&
+				objects.ChannelCredentialsVersion(existing.Credentials, existing.DisabledAPIKeys) != expectedCredentialsVersion {
+				return ErrChannelUpdatedConcurrently
 			}
 			ts := existing.UpdatedAt
 			existingUpdatedAt = &ts
@@ -1373,9 +1405,9 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 			mut.ClearErrorMessage()
 		}
 
-		dialectName := db.Driver().Dialect()
-		guardVersion := guardProviderIdentity || stateChanges != nil
-		if guardVersion {
+		isSQLite := db.Driver().Dialect() == dialect.SQLite
+		sqliteCredentialGuard := isSQLite && (stateChanges != nil || hasExpectedCredentialsVersion)
+		if guardProviderIdentity || sqliteCredentialGuard {
 			guardUpdatedAt := existingIdentity.UpdatedAt
 			if existingUpdatedAt != nil {
 				if expectedUpdatedAt != nil && !existingUpdatedAt.Equal(*expectedUpdatedAt) {
@@ -1386,19 +1418,17 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 				}
 				guardUpdatedAt = *existingUpdatedAt
 			}
-			mut.Where(channel.UpdatedAtEQ(guardUpdatedAt)).
-				SetUpdatedAt(nextChannelUpdatedAt(dialectName, guardUpdatedAt))
-		} else if existingUpdatedAt != nil {
-			// Ensure credential/type updates strictly advance updated_at so a stale
-			// expectedUpdatedAt check never misses a same-tick rotation.
-			mut.SetUpdatedAt(nextChannelUpdatedAt(dialectName, *existingUpdatedAt))
-		} else if dialectName == dialect.MySQL {
-			mut.SetUpdatedAt(nextChannelUpdatedAt(dialectName, existingIdentity.UpdatedAt))
+			mut.Where(channel.UpdatedAtEQ(guardUpdatedAt))
+			if sqliteCredentialGuard {
+				mut.SetUpdatedAt(nextSQLiteChannelUpdatedAt(guardUpdatedAt))
+			}
+		} else if isSQLite && existingUpdatedAt != nil {
+			mut.SetUpdatedAt(nextSQLiteChannelUpdatedAt(*existingUpdatedAt))
 		}
 
 		channel, err := mut.Save(ctx)
 		if err != nil {
-			if ent.IsNotFound(err) {
+			if ent.IsNotFound(err) || (sqliteCredentialGuard && isSQLiteBusySnapshotError(err)) {
 				return ErrChannelUpdatedConcurrently
 			}
 			return fmt.Errorf("failed to update channel: %w", err)

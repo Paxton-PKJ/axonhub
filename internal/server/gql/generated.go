@@ -436,6 +436,7 @@ type ComplexityRoot struct {
 		ChannelProbes           func(childComplexity int) int
 		CreatedAt               func(childComplexity int) int
 		Credentials             func(childComplexity int) int
+		CredentialsVersion      func(childComplexity int) int
 		DefaultEndpoints        func(childComplexity int) int
 		DefaultTestModel        func(childComplexity int) int
 		DisabledAPIKeys         func(childComplexity int) int
@@ -1259,7 +1260,7 @@ type ComplexityRoot struct {
 		UpdateAutoBackupSettings              func(childComplexity int, input UpdateAutoBackupSettingsInput) int
 		UpdateBrandSettings                   func(childComplexity int, input UpdateBrandSettingsInput) int
 		UpdateCatalogSettings                 func(childComplexity int, input UpdateCatalogSettingsInput) int
-		UpdateChannel                         func(childComplexity int, id objects.GUID, input ent.UpdateChannelInput, apiKeyStateChanges *biz.ChannelAPIKeyStateChanges, expectedUpdatedAt *time.Time) int
+		UpdateChannel                         func(childComplexity int, id objects.GUID, input ent.UpdateChannelInput, apiKeyStateChanges *biz.ChannelAPIKeyStateChanges, expectedCredentialsVersion *string) int
 		UpdateChannelOverrideTemplate         func(childComplexity int, id objects.GUID, input ent.UpdateChannelOverrideTemplateInput) int
 		UpdateChannelSettings                 func(childComplexity int, id objects.GUID, input biz.UpdateChannelSettingsInput) int
 		UpdateChannelStatus                   func(childComplexity int, id objects.GUID, status channel.Status) int
@@ -2562,6 +2563,7 @@ type ChannelResolver interface {
 	AllModelEntries(ctx context.Context, obj *ent.Channel) ([]*biz.ChannelModelEntry, error)
 	Credentials(ctx context.Context, obj *ent.Channel) (*objects.ChannelCredentials, error)
 	DisabledAPIKeys(ctx context.Context, obj *ent.Channel) ([]*objects.DisabledAPIKey, error)
+	CredentialsVersion(ctx context.Context, obj *ent.Channel) (*string, error)
 	LiveLimiterStats(ctx context.Context, obj *ent.Channel) (*ChannelLimiterStats, error)
 }
 type ChannelModelPriceResolver interface {
@@ -2612,7 +2614,7 @@ type MutationResolver interface {
 	CreateChannel(ctx context.Context, input ent.CreateChannelInput) (*ent.Channel, error)
 	DuplicateChannel(ctx context.Context, sourceID objects.GUID, input ent.CreateChannelInput) (*ent.Channel, error)
 	BulkCreateChannels(ctx context.Context, input biz.BulkCreateChannelsInput) ([]*ent.Channel, error)
-	UpdateChannel(ctx context.Context, id objects.GUID, input ent.UpdateChannelInput, apiKeyStateChanges *biz.ChannelAPIKeyStateChanges, expectedUpdatedAt *time.Time) (*ent.Channel, error)
+	UpdateChannel(ctx context.Context, id objects.GUID, input ent.UpdateChannelInput, apiKeyStateChanges *biz.ChannelAPIKeyStateChanges, expectedCredentialsVersion *string) (*ent.Channel, error)
 	UpdateChannelSettings(ctx context.Context, id objects.GUID, input biz.UpdateChannelSettingsInput) (*ent.Channel, error)
 	SaveChannelEndpoints(ctx context.Context, input biz.SaveChannelEndpointsInput) (*ent.Channel, error)
 	DetectChannelEndpoints(ctx context.Context, input biz.DetectChannelEndpointsInput) (*biz.DetectChannelEndpointsPayload, error)
@@ -4264,6 +4266,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Channel.Credentials(childComplexity), true
+	case "Channel.credentialsVersion":
+		if e.complexity.Channel.CredentialsVersion == nil {
+			break
+		}
+
+		return e.complexity.Channel.CredentialsVersion(childComplexity), true
 	case "Channel.defaultEndpoints":
 		if e.complexity.Channel.DefaultEndpoints == nil {
 			break
@@ -8118,7 +8126,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.complexity.Mutation.UpdateChannel(childComplexity, args["id"].(objects.GUID), args["input"].(ent.UpdateChannelInput), args["apiKeyStateChanges"].(*biz.ChannelAPIKeyStateChanges), args["expectedUpdatedAt"].(*time.Time)), true
+		return e.complexity.Mutation.UpdateChannel(childComplexity, args["id"].(objects.GUID), args["input"].(ent.UpdateChannelInput), args["apiKeyStateChanges"].(*biz.ChannelAPIKeyStateChanges), args["expectedCredentialsVersion"].(*string)), true
 	case "Mutation.updateChannelOverrideTemplate":
 		if e.complexity.Mutation.UpdateChannelOverrideTemplate == nil {
 			break
@@ -15858,11 +15866,11 @@ func (ec *executionContext) field_Mutation_updateChannel_args(ctx context.Contex
 		return nil, err
 	}
 	args["apiKeyStateChanges"] = arg2
-	arg3, err := graphql.ProcessArgField(ctx, rawArgs, "expectedUpdatedAt", ec.unmarshalOTime2ᚖtimeᚐTime)
+	arg3, err := graphql.ProcessArgField(ctx, rawArgs, "expectedCredentialsVersion", ec.unmarshalOString2ᚖstring)
 	if err != nil {
 		return nil, err
 	}
-	args["expectedUpdatedAt"] = arg3
+	args["expectedCredentialsVersion"] = arg3
 	return args, nil
 }
 
@@ -21716,6 +21724,8 @@ func (ec *executionContext) fieldContext_ApplyChannelOverrideTemplatePayload_cha
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -22732,6 +22742,8 @@ func (ec *executionContext) fieldContext_BulkImportChannelsResult_channels(_ con
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -22885,6 +22897,8 @@ func (ec *executionContext) fieldContext_BulkUpdateChannelAutoDisablePayload_cha
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -23038,6 +23052,8 @@ func (ec *executionContext) fieldContext_BulkUpdateChannelOrderingResult_channel
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -25607,6 +25623,35 @@ func (ec *executionContext) fieldContext_Channel_disabledAPIKeys(_ context.Conte
 	return fc, nil
 }
 
+func (ec *executionContext) _Channel_credentialsVersion(ctx context.Context, field graphql.CollectedField, obj *ent.Channel) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Channel_credentialsVersion,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.Channel().CredentialsVersion(ctx, obj)
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Channel_credentialsVersion(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Channel",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Channel_liveLimiterStats(ctx context.Context, field graphql.CollectedField, obj *ent.Channel) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -26202,6 +26247,8 @@ func (ec *executionContext) fieldContext_ChannelEdge_node(_ context.Context, fie
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -26970,6 +27017,8 @@ func (ec *executionContext) fieldContext_ChannelModelPrice_channel(_ context.Con
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -28971,6 +29020,8 @@ func (ec *executionContext) fieldContext_ChannelProbe_channel(_ context.Context,
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -31838,6 +31889,8 @@ func (ec *executionContext) fieldContext_ClearChannelOverrideTemplatesPayload_ch
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -37419,6 +37472,8 @@ func (ec *executionContext) fieldContext_ModelChannelConnection_channel(_ contex
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -38716,6 +38771,8 @@ func (ec *executionContext) fieldContext_Mutation_createChannel(ctx context.Cont
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -38823,6 +38880,8 @@ func (ec *executionContext) fieldContext_Mutation_duplicateChannel(ctx context.C
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -38930,6 +38989,8 @@ func (ec *executionContext) fieldContext_Mutation_bulkCreateChannels(ctx context
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -38958,7 +39019,7 @@ func (ec *executionContext) _Mutation_updateChannel(ctx context.Context, field g
 		ec.fieldContext_Mutation_updateChannel,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.resolvers.Mutation().UpdateChannel(ctx, fc.Args["id"].(objects.GUID), fc.Args["input"].(ent.UpdateChannelInput), fc.Args["apiKeyStateChanges"].(*biz.ChannelAPIKeyStateChanges), fc.Args["expectedUpdatedAt"].(*time.Time))
+			return ec.resolvers.Mutation().UpdateChannel(ctx, fc.Args["id"].(objects.GUID), fc.Args["input"].(ent.UpdateChannelInput), fc.Args["apiKeyStateChanges"].(*biz.ChannelAPIKeyStateChanges), fc.Args["expectedCredentialsVersion"].(*string))
 		},
 		nil,
 		ec.marshalNChannel2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋentᚐChannel,
@@ -39037,6 +39098,8 @@ func (ec *executionContext) fieldContext_Mutation_updateChannel(ctx context.Cont
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -39144,6 +39207,8 @@ func (ec *executionContext) fieldContext_Mutation_updateChannelSettings(ctx cont
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -39251,6 +39316,8 @@ func (ec *executionContext) fieldContext_Mutation_saveChannelEndpoints(ctx conte
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -39403,6 +39470,8 @@ func (ec *executionContext) fieldContext_Mutation_updateChannelStatus(ctx contex
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -54393,6 +54462,8 @@ func (ec *executionContext) fieldContext_ProviderQuotaStatus_channel(_ context.C
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -55732,6 +55803,8 @@ func (ec *executionContext) fieldContext_Query_allChannelSummarys(ctx context.Co
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -60724,6 +60797,8 @@ func (ec *executionContext) fieldContext_Request_channel(_ context.Context, fiel
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -62018,6 +62093,8 @@ func (ec *executionContext) fieldContext_RequestExecution_channel(_ context.Cont
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -69561,6 +69638,8 @@ func (ec *executionContext) fieldContext_UnassociatedChannel_channel(_ context.C
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -70675,6 +70754,8 @@ func (ec *executionContext) fieldContext_UsageLog_channel(_ context.Context, fie
 				return ec.fieldContext_Channel_credentials(ctx, field)
 			case "disabledAPIKeys":
 				return ec.fieldContext_Channel_disabledAPIKeys(ctx, field)
+			case "credentialsVersion":
+				return ec.fieldContext_Channel_credentialsVersion(ctx, field)
 			case "liveLimiterStats":
 				return ec.fieldContext_Channel_liveLimiterStats(ctx, field)
 			}
@@ -106247,6 +106328,39 @@ func (ec *executionContext) _Channel(ctx context.Context, sel ast.SelectionSet, 
 					}
 				}()
 				res = ec._Channel_disabledAPIKeys(ctx, field, obj)
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "credentialsVersion":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Channel_credentialsVersion(ctx, field, obj)
 				return res
 			}
 

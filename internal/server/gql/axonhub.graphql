@@ -971,6 +971,12 @@ extend type Channel {
   disabledAPIKeys: [DisabledAPIKey!] @goField(forceResolver: true)
 
   """
+  Opaque hash of the channel's credentials and disabled API key state for
+  optimistic locking on credential writes. Null if user cannot access credentials.
+  """
+  credentialsVersion: String @goField(forceResolver: true)
+
+  """
   Real-time per-channel concurrency limiter snapshot. Returns null when the channel
   has no MaxConcurrent configured (no admission control).
   """
@@ -1116,7 +1122,7 @@ type Mutation {
     id: ID!
     input: UpdateChannelInput!
     apiKeyStateChanges: ChannelAPIKeyStateChangesInput
-    expectedUpdatedAt: Time
+    expectedCredentialsVersion: String
   ): Channel!
   updateChannelSettings(id: ID!, input: UpdateChannelSettingsInput!): Channel!
   saveChannelEndpoints(input: SaveChannelEndpointsInput!): Channel!

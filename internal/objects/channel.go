@@ -518,6 +518,107 @@ func CredentialFingerprint(ref string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+type canonicalOAuthCredentialsVersion struct {
+	ClientID     string   `json:"clientId,omitempty"`
+	AccessToken  string   `json:"accessToken,omitempty"`
+	RefreshToken string   `json:"refreshToken,omitempty"`
+	IDToken      string   `json:"idToken,omitempty"`
+	ExpiresAt    string   `json:"expiresAt,omitempty"`
+	TokenType    string   `json:"tokenType,omitempty"`
+	Scopes       []string `json:"scopes,omitempty"`
+}
+
+type canonicalDisabledAPIKeyVersion struct {
+	Key           string `json:"key"`
+	DisabledAt    string `json:"disabledAt"`
+	ErrorCode     int    `json:"errorCode"`
+	Reason        string `json:"reason,omitempty"`
+	ExpiresAt     string `json:"expiresAt,omitempty"`
+	QuotaDisabled bool   `json:"quotaDisabled,omitempty"`
+}
+
+type canonicalChannelCredentialsVersion struct {
+	APIKey                string                            `json:"apiKey,omitempty"`
+	OAuth                 *canonicalOAuthCredentialsVersion `json:"oauth,omitempty"`
+	APIKeys               []string                          `json:"apiKeys,omitempty"`
+	APIKeyNames           []APIKeyName                      `json:"apiKeyNames,omitempty"`
+	VertexAPIKeys         []VertexAPIKey                    `json:"vertexApiKeys,omitempty"`
+	VertexServiceAccounts []GCPCredential                   `json:"vertexServiceAccounts,omitempty"`
+	ManagementAPIKey      string                            `json:"managementApiKey,omitempty"`
+	Azure                 *AzureCredential                  `json:"azure,omitempty"`
+	GCP                   *GCPCredential                    `json:"gcp,omitempty"`
+	DisabledKeys          []canonicalDisabledAPIKeyVersion  `json:"disabledKeys,omitempty"`
+}
+
+func nilIfEmptySlice[T any](items []T) []T {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]T, len(items))
+	copy(out, items)
+	return out
+}
+
+// ChannelCredentialsVersion returns a deterministic SHA-256 hex digest over the
+// channel's persisted credentials and disabled API keys for optimistic locking.
+func ChannelCredentialsVersion(creds ChannelCredentials, disabledKeys []DisabledAPIKey) string {
+	var oauth *canonicalOAuthCredentialsVersion
+	if creds.OAuth != nil {
+		var expiresAt string
+		if !creds.OAuth.ExpiresAt.IsZero() {
+			expiresAt = creds.OAuth.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
+		oauth = &canonicalOAuthCredentialsVersion{
+			ClientID:     creds.OAuth.ClientID,
+			AccessToken:  creds.OAuth.AccessToken,
+			RefreshToken: creds.OAuth.RefreshToken,
+			IDToken:      creds.OAuth.IDToken,
+			ExpiresAt:    expiresAt,
+			TokenType:    creds.OAuth.TokenType,
+			Scopes:       nilIfEmptySlice(creds.OAuth.Scopes),
+		}
+	}
+
+	var canonicalDisabled []canonicalDisabledAPIKeyVersion
+	if len(disabledKeys) > 0 {
+		canonicalDisabled = make([]canonicalDisabledAPIKeyVersion, len(disabledKeys))
+		for i, dk := range disabledKeys {
+			var disabledAt string
+			if !dk.DisabledAt.IsZero() {
+				disabledAt = dk.DisabledAt.UTC().Format(time.RFC3339Nano)
+			}
+			var expiresAt string
+			if dk.ExpiresAt != nil && !dk.ExpiresAt.IsZero() {
+				expiresAt = dk.ExpiresAt.UTC().Format(time.RFC3339Nano)
+			}
+			canonicalDisabled[i] = canonicalDisabledAPIKeyVersion{
+				Key:           dk.Key,
+				DisabledAt:    disabledAt,
+				ErrorCode:     dk.ErrorCode,
+				Reason:        dk.Reason,
+				ExpiresAt:     expiresAt,
+				QuotaDisabled: dk.QuotaDisabled,
+			}
+		}
+	}
+
+	payload := canonicalChannelCredentialsVersion{
+		APIKey:                creds.APIKey,
+		OAuth:                 oauth,
+		APIKeys:               nilIfEmptySlice(creds.APIKeys),
+		APIKeyNames:           nilIfEmptySlice(creds.APIKeyNames),
+		VertexAPIKeys:         nilIfEmptySlice(creds.VertexAPIKeys),
+		VertexServiceAccounts: nilIfEmptySlice(creds.VertexServiceAccounts),
+		ManagementAPIKey:      creds.ManagementAPIKey,
+		Azure:                 creds.Azure,
+		GCP:                   creds.GCP,
+		DisabledKeys:          canonicalDisabled,
+	}
+	encoded, _ := json.Marshal(payload)
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
+}
+
 type ChannelCredentials struct {
 	// APIKey is the API key for the channel, for the single key channel, e.g. Codex, Claude code, Antigravity.
 	// It is kept for backward compatibility with existing data, recommend to use OAuth instead.

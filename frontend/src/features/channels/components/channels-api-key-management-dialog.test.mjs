@@ -20,7 +20,9 @@ new Function('require', 'exports', apiKeyNamesJS)(() => ({}), apiKeyNamesExports
 function manager(initialRowOverride, options = {}) {
   const ref = 'vertex-sa:synthetic-account';
   const state = [];
+  const refs = [];
   let cursor = 0;
+  let refCursor = 0;
   let initialized = false;
   let disabledKeys = [];
   const baseRow = initialRowOverride ?? {
@@ -32,10 +34,16 @@ function manager(initialRowOverride, options = {}) {
       vertexServiceAccounts: [{ credentialRef: ref, jsonData: '{}', projectID: 'synthetic' }],
     },
   };
-  let activeRow = structuredClone(options.contextRow ?? baseRow);
+  let activeRow = structuredClone(baseRow);
   let serverCredentials = structuredClone(activeRow.credentials ?? {});
-  let serverUpdatedAt = activeRow.updatedAt;
   let serverVersion = 0;
+  let serverCredentialsVersion =
+    'credentialsVersion' in activeRow
+      ? activeRow.credentialsVersion
+      : activeRow.credentials
+        ? `ver-${activeRow.id ?? 'synthetic'}-0`
+        : undefined;
+  activeRow.credentialsVersion = serverCredentialsVersion;
   let disabledKeysUpdatedAt = 1;
   const updateChannelCalls = [];
   const enableSelectedCalls = [];
@@ -62,7 +70,11 @@ function manager(initialRowOverride, options = {}) {
       ];
     },
     useMemo: (compute) => compute(),
-    useRef: (current) => ({ current }),
+    useRef(initial) {
+      const slot = refCursor++;
+      if (!(slot in refs)) refs[slot] = { current: initial };
+      return refs[slot];
+    },
     useEffect(effect, deps) {
       const slot = effectCursor++;
       const prev = effectSlots[slot];
@@ -82,12 +94,18 @@ function manager(initialRowOverride, options = {}) {
     },
   };
   const data = {
-    fetchLatestChannel: async (id) => ({
-      ...activeRow,
-      id,
-      ...(serverUpdatedAt ? { updatedAt: serverUpdatedAt } : {}),
-      credentials: structuredClone(serverCredentials),
-    }),
+    fetchLatestChannel: async (id) => {
+      const defaultFetch = async () => ({
+        ...activeRow,
+        id,
+        ...(serverCredentialsVersion !== undefined ? { credentialsVersion: serverCredentialsVersion } : {}),
+        credentials: structuredClone(serverCredentials),
+      });
+      if (options.onFetchLatestChannel) {
+        return options.onFetchLatestChannel(id, defaultFetch);
+      }
+      return defaultFetch();
+    },
     useChannelDisabledAPIKeys: () => ({
       data: disabledKeys,
       isLoading: false,
@@ -135,38 +153,48 @@ function manager(initialRowOverride, options = {}) {
       ),
     useUpdateChannel: () =>
       mutation(async (payload) => {
-        updateChannelCalls.push(payload);
-        if (serverUpdatedAt && payload.expectedUpdatedAt && payload.expectedUpdatedAt !== serverUpdatedAt) {
-          throw {
-            errors: [
-              {
-                message: 'channel was updated concurrently; retry the operation',
-                extensions: { code: 'CHANNEL_UPDATED_CONCURRENTLY' },
-              },
-            ],
+        const executeDefault = async () => {
+          updateChannelCalls.push(payload);
+          if (
+            serverCredentialsVersion &&
+            payload.expectedCredentialsVersion &&
+            payload.expectedCredentialsVersion !== serverCredentialsVersion
+          ) {
+            throw {
+              errors: [
+                {
+                  message: 'channel was updated concurrently; retry the operation',
+                  extensions: { code: 'CHANNEL_UPDATED_CONCURRENTLY' },
+                },
+              ],
+            };
+          }
+          if (payload.input?.credentials) {
+            serverCredentials = { ...serverCredentials, ...structuredClone(payload.input.credentials) };
+            const survivingRefs = new Set([
+              ...(serverCredentials.apiKeys ?? []),
+              ...((serverCredentials.vertexApiKeys ?? []).map((item) => item.apiKey)),
+              ...((serverCredentials.vertexServiceAccounts ?? [])
+                .map((item) => item.credentialRef)
+                .filter(Boolean)),
+            ]);
+            disabledKeys = disabledKeys.filter((item) => survivingRefs.has(item.key));
+          }
+          if (serverCredentialsVersion !== undefined) {
+            serverVersion += 1;
+            serverCredentialsVersion = `ver-${payload.id ?? 'synthetic'}-${serverVersion}`;
+          }
+          const { credentials: _omitted, ...rowWithoutCredentials } = activeRow;
+          return {
+            ...rowWithoutCredentials,
+            id: payload.id,
+            ...(serverCredentialsVersion !== undefined ? { credentialsVersion: serverCredentialsVersion } : {}),
           };
-        }
-        if (payload.input?.credentials) {
-          serverCredentials = { ...serverCredentials, ...structuredClone(payload.input.credentials) };
-          const survivingRefs = new Set([
-            ...(serverCredentials.apiKeys ?? []),
-            ...((serverCredentials.vertexApiKeys ?? []).map((item) => item.apiKey)),
-            ...((serverCredentials.vertexServiceAccounts ?? [])
-              .map((item) => item.credentialRef)
-              .filter(Boolean)),
-          ]);
-          disabledKeys = disabledKeys.filter((item) => survivingRefs.has(item.key));
-        }
-        if (serverUpdatedAt) {
-          serverVersion += 1;
-          serverUpdatedAt = new Date(Date.UTC(2026, 10, 28, 0, serverVersion, 0)).toISOString();
-        }
-        const { credentials: _omitted, ...rowWithoutCredentials } = activeRow;
-        return {
-          ...rowWithoutCredentials,
-          id: payload.id,
-          ...(serverUpdatedAt ? { updatedAt: serverUpdatedAt } : {}),
         };
+        if (options.onUpdateChannel) {
+          return options.onUpdateChannel(payload, executeDefault);
+        }
+        return executeDefault();
       }),
     useDeleteDisabledChannelAPIKeys: () =>
       mutation(async ({ channelID, keys }) => {
@@ -182,9 +210,9 @@ function manager(initialRowOverride, options = {}) {
         if (Array.isArray(serverCredentials.apiKeyNames)) {
           serverCredentials.apiKeyNames = serverCredentials.apiKeyNames.filter((item) => !set.has(item.key));
         }
-        if (serverUpdatedAt) {
+        if (serverCredentialsVersion !== undefined) {
           serverVersion += 1;
-          serverUpdatedAt = new Date(Date.UTC(2026, 10, 28, 0, serverVersion, 0)).toISOString();
+          serverCredentialsVersion = `ver-${channelID ?? 'synthetic'}-${serverVersion}`;
         }
         return { success: true };
       }),
@@ -199,7 +227,7 @@ function manager(initialRowOverride, options = {}) {
     '../context/channels-context': {
       useChannels: () => ({
         get currentRow() {
-          return activeRow;
+          return options.contextRow ?? activeRow;
         },
         setCurrentRow(next) {
           activeRow = typeof next === 'function' ? next(activeRow) : next;
@@ -221,9 +249,10 @@ function manager(initialRowOverride, options = {}) {
     let tree;
     for (let pass = 0; pass < 3; pass++) {
       cursor = 0;
+      refCursor = 0;
       effectCursor = 0;
       stateDirty = false;
-      tree = exports.ChannelsAPIKeyManagementDialog({ open: true, onOpenChange() {} });
+      tree = exports.ChannelsAPIKeyManagementDialog({ currentRow: activeRow, open: true, onOpenChange() {} });
       const pending = effects.splice(0);
       pending.forEach((run) => run());
       if (!initialized) {
@@ -238,6 +267,20 @@ function manager(initialRowOverride, options = {}) {
   }
   return {
     render,
+    switchChannelRow: (nextRow) => {
+      activeRow = structuredClone(nextRow);
+      serverCredentials = structuredClone(activeRow.credentials ?? {});
+      serverVersion = 0;
+      serverCredentialsVersion =
+        'credentialsVersion' in activeRow
+          ? activeRow.credentialsVersion
+          : activeRow.credentials
+            ? `ver-${activeRow.id ?? 'synthetic'}-0`
+            : undefined;
+      activeRow.credentialsVersion = serverCredentialsVersion;
+      render();
+    },
+    getActiveRow: () => structuredClone(activeRow),
     isServerDisabled: (target = ref) => disabledKeys.some((item) => item.key === target),
     setServerDisabledKeys: (keys) => {
       disabledKeys = keys.map((key) => ({ key, errorCode: 0, reason: 'Manually disabled by user', quotaDisabled: false }));
@@ -249,12 +292,12 @@ function manager(initialRowOverride, options = {}) {
       disabledKeys = nextRecords;
       disabledKeysUpdatedAt += 1;
     },
-    simulateExternalCredentialRotation: (nextCredentials, nextUpdatedAt) => {
+    simulateExternalCredentialRotation: (nextCredentials, nextCredentialsVersion) => {
       serverCredentials = structuredClone(nextCredentials);
-      serverUpdatedAt = nextUpdatedAt;
+      serverCredentialsVersion = nextCredentialsVersion;
     },
     getServerCredentials: () => structuredClone(serverCredentials),
-    getServerUpdatedAt: () => serverUpdatedAt,
+    getServerCredentialsVersion: () => serverCredentialsVersion,
     updateChannelCalls,
     enableSelectedCalls,
     disableSelectedCalls,
@@ -317,17 +360,17 @@ test('a tested disabled JSON credential becomes enabled after successful recover
 });
 
 test('inline key name edit saves immediately via updateChannel and bulk import/delete preserve surviving names', async () => {
-  const t0 = '2026-11-28T00:00:00.000Z';
+  const v0 = 'cred-ver-0';
   const view = manager({
     id: 'ch-multi',
     type: 'openai',
     name: 'multi',
-    updatedAt: t0,
+    credentialsVersion: v0,
     credentials: {
       apiKeys: ['sk-key-one-1111', 'sk-key-two-2222'],
       apiKeyNames: [{ key: 'sk-key-one-1111', name: 'primary' }],
     },
-  });
+  }, { contextRow: { id: 'ch-multi', name: 'multi' } });
 
   const rows = apiKeyRows(view.render());
   assert.equal(rows.length, 2);
@@ -346,11 +389,11 @@ test('inline key name edit saves immediately via updateChannel and bulk import/d
   const saveButton = nodes(apiKeyRows(view.render())[1]).find((node) => node.props?.['aria-label'] === 'common.buttons.save');
   await saveButton.props.onClick();
 
-  const t1 = view.getServerUpdatedAt();
-  assert.notEqual(t1, t0);
+  const v1 = view.getServerCredentialsVersion();
+  assert.notEqual(v1, v0);
   assert.deepEqual(view.updateChannelCalls[0], {
     id: 'ch-multi',
-    expectedUpdatedAt: t0,
+    expectedCredentialsVersion: v0,
     input: {
       credentials: {
         apiKeys: ['sk-key-one-1111', 'sk-key-two-2222'],
@@ -373,11 +416,11 @@ test('inline key name edit saves immediately via updateChannel and bulk import/d
   assert.ok(importButton);
   await importButton.props.onClick();
 
-  const t2 = view.getServerUpdatedAt();
-  assert.notEqual(t2, t1);
+  const v2 = view.getServerCredentialsVersion();
+  assert.notEqual(v2, v1);
   assert.deepEqual(view.updateChannelCalls[1], {
     id: 'ch-multi',
-    expectedUpdatedAt: t1,
+    expectedCredentialsVersion: v1,
     input: {
       credentials: {
         apiKeys: ['sk-key-one-1111', 'sk-key-two-2222', 'sk-key-three-3333'],
@@ -407,7 +450,7 @@ test('inline key name edit saves immediately via updateChannel and bulk import/d
 
   assert.deepEqual(view.updateChannelCalls[2], {
     id: 'ch-multi',
-    expectedUpdatedAt: t2,
+    expectedCredentialsVersion: v2,
     input: {
       credentials: {
         apiKeys: ['sk-key-one-1111', 'sk-key-three-3333'],
@@ -443,13 +486,13 @@ test('mixed batch delete validates combined enabled count upfront and submits at
   assert.equal(blockedView.updateChannelCalls.length, 0);
 
   // With A (enabled), B (disabled), C (disabled), D (enabled): selecting A and B uses a single atomic updateChannel call
-  // so deleting B does not bump updated_at ahead of the expectedUpdatedAt check and server-side prunes B's disabled record.
-  const t0 = '2026-11-28T00:00:00.000Z';
+  // so deleting B does not mutate state ahead of expectedCredentialsVersion and server-side prunes B's disabled record.
+  const v0 = 'cred-ver-mixed-0';
   const validView = manager({
     id: 'ch-del-mixed',
     type: 'openai',
     name: 'del-mixed',
-    updatedAt: t0,
+    credentialsVersion: v0,
     credentials: {
       apiKeys: ['sk-a', 'sk-b', 'sk-c', 'sk-d'],
     },
@@ -476,7 +519,7 @@ test('mixed batch delete validates combined enabled count upfront and submits at
   assert.deepEqual(validView.updateChannelCalls, [
     {
       id: 'ch-del-mixed',
-      expectedUpdatedAt: t0,
+      expectedCredentialsVersion: v0,
       input: {
         credentials: {
           apiKeys: ['sk-c', 'sk-d'],
@@ -490,13 +533,13 @@ test('mixed batch delete validates combined enabled count upfront and submits at
   assert.equal(apiKeyRows(validView.render()).length, 2);
 });
 
-test('pure disabled-key delete calls deleteDisabledAPIKeys, syncs baseline updatedAt, and allows subsequent rename', async () => {
-  const t0 = '2026-11-28T00:00:00.000Z';
+test('pure disabled-key delete calls deleteDisabledAPIKeys, syncs baseline credentialsVersion, and allows subsequent rename', async () => {
+  const v0 = 'cred-ver-dis-0';
   const view = manager({
     id: 'ch-del-disabled-only',
     type: 'openai',
     name: 'del-disabled-only',
-    updatedAt: t0,
+    credentialsVersion: v0,
     credentials: {
       apiKeys: ['sk-alive-1111', 'sk-dead-2222'],
     },
@@ -511,12 +554,12 @@ test('pure disabled-key delete calls deleteDisabledAPIKeys, syncs baseline updat
     .find((node) => node.type === 'Button' && node.props.children === 'common.buttons.confirm')
     .props.onClick();
 
-  const t1 = view.getServerUpdatedAt();
-  assert.notEqual(t1, t0);
+  const v1 = view.getServerCredentialsVersion();
+  assert.notEqual(v1, v0);
   assert.deepEqual(view.deleteDisabledCalls, [{ channelID: 'ch-del-disabled-only', keys: ['sk-dead-2222'] }]);
   assert.equal(apiKeyRows(view.render()).length, 1);
 
-  // Subsequent rename uses synced t1 instead of stale t0
+  // Subsequent rename uses synced v1 instead of stale v0
   nodes(apiKeyRows(view.render())[0])
     .find((node) => node.props?.['aria-label'] === 'channels.dialogs.keyManagement.editName')
     .props.onClick();
@@ -530,7 +573,7 @@ test('pure disabled-key delete calls deleteDisabledAPIKeys, syncs baseline updat
   assert.deepEqual(view.updateChannelCalls, [
     {
       id: 'ch-del-disabled-only',
-      expectedUpdatedAt: t1,
+      expectedCredentialsVersion: v1,
       input: {
         credentials: {
           apiKeys: ['sk-alive-1111'],
@@ -681,13 +724,13 @@ test('a key flagged disabled in testResults is treated as disabled before query 
 });
 
 test('stale rename rejects overwrite of concurrently rotated key, preserves draft, and succeeds after resubmit', async () => {
-  const initialUpdatedAt = '2026-11-28T00:00:00.000Z';
-  const rotatedUpdatedAt = '2026-11-28T00:05:00.000Z';
+  const initialVersion = 'cred-ver-initial';
+  const rotatedVersion = 'cred-ver-rotated';
   const view = manager({
     id: 'ch-conflict',
     type: 'openai',
     name: 'conflict-ch',
-    updatedAt: initialUpdatedAt,
+    credentialsVersion: initialVersion,
     credentials: {
       apiKeys: ['sk-key-one-1111', 'sk-key-two-2222'],
     },
@@ -700,12 +743,12 @@ test('stale rename rejects overwrite of concurrently rotated key, preserves draf
     target: { value: '  prod-primary  ' },
   });
 
-  view.simulateExternalCredentialRotation({ apiKeys: ['sk-key-one-1111', 'sk-key-three-3333'] }, rotatedUpdatedAt);
+  view.simulateExternalCredentialRotation({ apiKeys: ['sk-key-one-1111', 'sk-key-three-3333'] }, rotatedVersion);
 
   // Submitting fails with CHANNEL_UPDATED_CONCURRENTLY -> rotated key survives, draft stays open with refreshed rows.
   await nodes(apiKeyRows(view.render())[0]).find((node) => node.props?.['aria-label'] === 'common.buttons.save').props.onClick();
 
-  assert.equal(view.updateChannelCalls[0].expectedUpdatedAt, initialUpdatedAt);
+  assert.equal(view.updateChannelCalls[0].expectedCredentialsVersion, initialVersion);
   assert.deepEqual(view.getServerCredentials().apiKeys, ['sk-key-one-1111', 'sk-key-three-3333']);
 
   const afterConflictTree = view.render();
@@ -716,23 +759,23 @@ test('stale rename rejects overwrite of concurrently rotated key, preserves draf
   assert.ok(retainedInput);
   assert.equal(retainedInput.props.value, '  prod-primary  ');
 
-  // Re-submitting commits against rotatedUpdatedAt and keeps sk-key-three-3333.
+  // Re-submitting commits against rotatedVersion and keeps sk-key-three-3333.
   await nodes(conflictRows[0]).find((node) => node.props?.['aria-label'] === 'common.buttons.save').props.onClick();
 
-  assert.equal(view.updateChannelCalls[1].expectedUpdatedAt, rotatedUpdatedAt);
+  assert.equal(view.updateChannelCalls[1].expectedCredentialsVersion, rotatedVersion);
   assert.deepEqual(view.updateChannelCalls[1].input.credentials, {
     apiKeys: ['sk-key-one-1111', 'sk-key-three-3333'],
     apiKeyNames: [{ key: 'sk-key-one-1111', name: 'prod-primary' }],
   });
 });
 
-test('consecutive renames in same dialog chain updatedAt from previous save', async () => {
-  const t0 = '2026-11-28T00:00:00.000Z';
+test('consecutive renames in same dialog chain credentialsVersion from previous save', async () => {
+  const v0 = 'cred-ver-seq-0';
   const view = manager({
     id: 'ch-consecutive',
     type: 'openai',
     name: 'consecutive-ch',
-    updatedAt: t0,
+    credentialsVersion: v0,
     credentials: {
       apiKeys: ['sk-first-1111', 'sk-second-2222'],
     },
@@ -745,9 +788,9 @@ test('consecutive renames in same dialog chain updatedAt from previous save', as
   });
   await nodes(apiKeyRows(view.render())[0]).find((node) => node.props?.['aria-label'] === 'common.buttons.save').props.onClick();
 
-  const t1 = view.getServerUpdatedAt();
-  assert.notEqual(t1, t0);
-  assert.equal(view.updateChannelCalls[0].expectedUpdatedAt, t0);
+  const v1 = view.getServerCredentialsVersion();
+  assert.notEqual(v1, v0);
+  assert.equal(view.updateChannelCalls[0].expectedCredentialsVersion, v0);
 
   const rows1 = apiKeyRows(view.render());
   nodes(rows1[1]).find((node) => node.props?.['aria-label'] === 'channels.dialogs.keyManagement.editName').props.onClick();
@@ -756,9 +799,163 @@ test('consecutive renames in same dialog chain updatedAt from previous save', as
   });
   await nodes(apiKeyRows(view.render())[1]).find((node) => node.props?.['aria-label'] === 'common.buttons.save').props.onClick();
 
-  assert.equal(view.updateChannelCalls[1].expectedUpdatedAt, t1);
+  assert.equal(view.updateChannelCalls[1].expectedCredentialsVersion, v1);
   assert.deepEqual(view.getServerCredentials().apiKeyNames, [
     { key: 'sk-first-1111', name: 'first-label' },
     { key: 'sk-second-2222', name: 'second-label' },
   ]);
+});
+
+test('missing credentials on currentRow disables and blocks bulk import to prevent wiping keys', async () => {
+  const view = manager({
+    id: 'ch-partial-missing-creds',
+    type: 'openai',
+    name: 'partial-no-creds',
+    credentialsVersion: undefined,
+    credentials: undefined,
+  });
+
+  const tree0 = view.render();
+  const textarea = nodes(tree0).find((node) => node.type === 'Textarea');
+  assert.equal(textarea.props.disabled, true);
+  textarea.props.onChange({ target: { value: 'sk-new-only-key' } });
+
+  const importButton = nodes(view.render()).find(
+    (node) => node.type === 'Button' && textContent(node).includes('channels.dialogs.keyManagement.importButton')
+  );
+  assert.ok(importButton);
+  assert.equal(importButton.props.disabled, true);
+  await importButton.props.onClick();
+
+  assert.equal(view.updateChannelCalls.length, 0);
+});
+
+test('late async mutation or baseline sync from previous channel never overwrites newly opened channel', async () => {
+  let resolveSlowUpdate;
+  let resolveSlowFetch;
+  const view = manager(
+    {
+      id: 'ch-A',
+      type: 'openai',
+      name: 'channel-A',
+      updatedAt: '2026-11-28T00:00:00.000Z',
+      credentials: {
+        apiKeys: ['sk-a1-1111', 'sk-a2-2222'],
+      },
+    },
+    {
+      onUpdateChannel: (_payload, executeDefault) =>
+        new Promise((resolve) => {
+          resolveSlowUpdate = () => resolve(executeDefault());
+        }),
+      onFetchLatestChannel: (_id, defaultFetch) =>
+        new Promise((resolve) => {
+          resolveSlowFetch = () => resolve(defaultFetch());
+        }),
+    }
+  );
+
+  // Start saving rename on ch-A while response stays pending.
+  nodes(apiKeyRows(view.render())[0])
+    .find((node) => node.props?.['aria-label'] === 'channels.dialogs.keyManagement.editName')
+    .props.onClick();
+  nodes(apiKeyRows(view.render())[0])
+    .find((node) => node.type === 'Input')
+    .props.onChange({ target: { value: 'stale-A-name' } });
+  const pendingRename = nodes(apiKeyRows(view.render())[0])
+    .find((node) => node.props?.['aria-label'] === 'common.buttons.save')
+    .props.onClick();
+
+  // Switch open dialog to ch-B before ch-A's mutation finishes.
+  view.switchChannelRow({
+    id: 'ch-B',
+    type: 'openai',
+    name: 'channel-B',
+    updatedAt: '2026-11-28T01:00:00.000Z',
+    credentials: {
+      apiKeys: ['sk-b1-1111', 'sk-b2-2222'],
+      apiKeyNames: [{ key: 'sk-b1-1111', name: 'b-primary' }],
+    },
+  });
+
+  resolveSlowUpdate();
+  await pendingRename;
+
+  assert.equal(view.getActiveRow().id, 'ch-B');
+  assert.deepEqual(view.getActiveRow().credentials.apiKeys, ['sk-b1-1111', 'sk-b2-2222']);
+  assert.deepEqual(view.getActiveRow().credentials.apiKeyNames, [{ key: 'sk-b1-1111', name: 'b-primary' }]);
+  const bRows = apiKeyRows(view.render());
+  assert.equal(bRows.length, 2);
+  assert.ok(nodes(bRows[0]).some((node) => node.props?.children === 'b-primary'));
+
+  // Even on the same channel, a slower baseline sync started before a newer commit cannot overwrite it.
+  let fetchResolved = false;
+  let allowImmediateUpdate = false;
+  let resolveBaselineFetch;
+  const sameView = manager(
+    {
+      id: 'ch-same',
+      type: 'openai',
+      name: 'same-channel',
+      updatedAt: '2026-11-28T02:00:00.000Z',
+      credentials: {
+        apiKeys: ['sk-s1-1111', 'sk-s2-2222'],
+      },
+    },
+    {
+      onFetchLatestChannel: (id) =>
+        new Promise((resolve) => {
+          resolveBaselineFetch = () => {
+            fetchResolved = true;
+            resolve({
+              id,
+              type: 'openai',
+              name: 'same-channel',
+              updatedAt: '2026-11-28T02:01:00.000Z',
+              credentials: {
+                apiKeys: ['sk-s1-1111', 'sk-s2-2222'],
+                apiKeyNames: [],
+              },
+            });
+          };
+        }),
+      onUpdateChannel: (_payload, executeDefault) => {
+        if (!allowImmediateUpdate) {
+          allowImmediateUpdate = true;
+        }
+        return executeDefault();
+      },
+    }
+  );
+
+  // Trigger disable (starts background syncBaselineAfterStateMutation without awaiting).
+  const disableBtn = nodes(apiKeyRows(sameView.render())[0]).find(
+    (node) => node.props?.['aria-label'] === 'channels.dialogs.keyManagement.disable'
+  );
+  const disablePopover = nodes(apiKeyRows(sameView.render())[0]).find(
+    (node) => node.type === 'Popover' && nodes(node).includes(disableBtn)
+  );
+  disablePopover.props.onOpenChange(true);
+  await nodes(nodes(apiKeyRows(sameView.render())[0]).find((node) => node.type === 'Popover' && node.props.open))
+    .find((node) => node.type === 'Button' && node.props.children === 'common.buttons.confirm')
+    .props.onClick();
+
+  // Complete a newer rename before the background fetch resolves.
+  nodes(apiKeyRows(sameView.render())[0])
+    .find((node) => node.props?.['aria-label'] === 'channels.dialogs.keyManagement.editName')
+    .props.onClick();
+  nodes(apiKeyRows(sameView.render())[0])
+    .find((node) => node.type === 'Input')
+    .props.onChange({ target: { value: 'newer-label' } });
+  await nodes(apiKeyRows(sameView.render())[0])
+    .find((node) => node.props?.['aria-label'] === 'common.buttons.save')
+    .props.onClick();
+
+  resolveBaselineFetch();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(fetchResolved, true);
+  assert.ok(nodes(apiKeyRows(sameView.render())[0]).some((node) => node.props?.children === 'newer-label'));
+  assert.equal(sameView.getActiveRow().credentials.apiKeyNames[0].name, 'newer-label');
+  void resolveSlowFetch;
 });

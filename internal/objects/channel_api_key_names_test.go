@@ -15,6 +15,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -119,4 +120,72 @@ func TestCredentialFingerprint(t *testing.T) {
 	require.Len(t, fp1, 64)
 	require.NotEqual(t, fp1, fp2)
 	require.Equal(t, fp1, CredentialFingerprint("sk-alpha-1234"))
+}
+
+func TestChannelCredentialsVersion(t *testing.T) {
+	shanghai := time.FixedZone("Asia/Shanghai", 8*3600)
+	disabledAtUTC := time.Date(2026, 11, 28, 4, 0, 0, 123000000, time.UTC)
+	expiresAtUTC := time.Date(2026, 11, 28, 5, 0, 0, 0, time.UTC)
+	disabledAtShanghai := disabledAtUTC.In(shanghai)
+	expiresAtShanghai := expiresAtUTC.In(shanghai)
+
+	vNil := ChannelCredentialsVersion(
+		ChannelCredentials{
+			APIKeys: []string{"sk-1", "sk-2"},
+			OAuth: &OAuthCredentials{
+				AccessToken:  "acc",
+				RefreshToken: "ref",
+				ExpiresAt:    expiresAtUTC,
+			},
+		},
+		[]DisabledAPIKey{{
+			Key:        "sk-2",
+			DisabledAt: disabledAtUTC,
+			ErrorCode:  401,
+			Reason:     "bad",
+			ExpiresAt:  &expiresAtUTC,
+		}},
+	)
+	vEmpty := ChannelCredentialsVersion(
+		ChannelCredentials{
+			APIKeys:               []string{"sk-1", "sk-2"},
+			APIKeyNames:           []APIKeyName{},
+			VertexAPIKeys:         []VertexAPIKey{},
+			VertexServiceAccounts: []GCPCredential{},
+			OAuth: &OAuthCredentials{
+				AccessToken:  "acc",
+				RefreshToken: "ref",
+				ExpiresAt:    expiresAtShanghai,
+				Scopes:       []string{},
+			},
+		},
+		[]DisabledAPIKey{{
+			Key:        "sk-2",
+			DisabledAt: disabledAtShanghai,
+			ErrorCode:  401,
+			Reason:     "bad",
+			ExpiresAt:  &expiresAtShanghai,
+		}},
+	)
+	require.Len(t, vNil, 64)
+	require.Equal(t, vNil, vEmpty)
+
+	// Nil vs empty disabled key slice must hash identically.
+	vNoDisabledNil := ChannelCredentialsVersion(ChannelCredentials{APIKeys: []string{"sk-1"}}, nil)
+	vNoDisabledEmpty := ChannelCredentialsVersion(ChannelCredentials{APIKeys: []string{"sk-1"}}, []DisabledAPIKey{})
+	require.Equal(t, vNoDisabledNil, vNoDisabledEmpty)
+
+	// Rotating key, renaming key, or changing disabled state must produce distinct hashes.
+	vRotated := ChannelCredentialsVersion(ChannelCredentials{APIKeys: []string{"sk-1", "sk-3"}}, nil)
+	vRenamed := ChannelCredentialsVersion(ChannelCredentials{
+		APIKeys:     []string{"sk-1", "sk-3"},
+		APIKeyNames: []APIKeyName{{Key: "sk-1", Name: "primary"}},
+	}, nil)
+	vDisabled := ChannelCredentialsVersion(
+		ChannelCredentials{APIKeys: []string{"sk-1", "sk-3"}},
+		[]DisabledAPIKey{{Key: "sk-3", DisabledAt: disabledAtUTC, Reason: "manual"}},
+	)
+	require.NotEqual(t, vNoDisabledNil, vRotated)
+	require.NotEqual(t, vRotated, vRenamed)
+	require.NotEqual(t, vRotated, vDisabled)
 }
