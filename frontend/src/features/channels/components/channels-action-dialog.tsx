@@ -1,15 +1,18 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react';
+import { format, formatDistanceToNow } from 'date-fns';
+import { enUS, zhCN } from 'date-fns/locale';
 import { z } from 'zod';
 import { useFieldArray, useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { RESPONSE_TIMEOUT_MAX_SECONDS } from '@/config/retry-policy';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { X, RefreshCw, Search, ChevronLeft, ChevronRight, PanelLeft, Plus, Trash2, Eye, EyeOff, Copy, Play, Info, Ban, Upload } from 'lucide-react';
+import { AlertTriangle, X, RefreshCw, Search, ChevronLeft, ChevronRight, PanelLeft, Plus, Trash2, Eye, EyeOff, Copy, Play, Info, Ban, Upload, Pencil, Check, CircleCheck, Undo2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { copyTextToClipboard } from '@/lib/clipboard';
+import { isErrorCode } from '@/lib/error-parser';
 import { useHorizontalScroll } from '@/hooks/use-horizontal-scroll';
 import { usePermissions } from '@/hooks/usePermissions';
 import { Badge } from '@/components/ui/badge';
@@ -49,8 +52,6 @@ import {
   useAllChannelNames,
   useAllChannelTags,
   useChannelDisabledAPIKeys,
-  useDisableChannelAPIKey,
-  useEnableChannelAPIKey,
   useSyncChannelModels,
   type CodexCatalogSkippedReason,
   type CodexCatalogVersion,
@@ -106,6 +107,22 @@ import { xaiDecodeSSO, xaiOAuthExchange, xaiOAuthStart } from '../data/xai';
 import { ProxyConfig, useOAuthFlow } from '../hooks/use-oauth-flow';
 import { mergeChannelSettingsForUpdate } from '../utils/merge';
 import { isValidModelPattern, matchesModelPattern } from '../utils/pattern';
+import {
+  EMPTY_DISABLED_API_KEYS,
+  MAX_API_KEY_NAME_LENGTH,
+  buildAPIKeyStateChanges,
+  computeSidebarDraftSummary,
+  containsMultilineKey,
+  countStaleAPIKeyNames,
+  filterActiveDisabledAPIKeys,
+  getAPIKeyNameMap,
+  getDeduplicatedValidKeys,
+  maskAPIKey,
+  normalizeAPIKeyNamesForKeys,
+  setAPIKeyName,
+  validateAPIKeyName,
+  validateNewSidebarKey,
+} from '../utils/api-key-names';
 import { ApiKeyStrategyFields, type APIKeyStrategyValue } from './channel-api-key-strategy';
 import { ChannelModelAliases } from './channel-model-preview';
 import { ProxyType } from './channels-proxy-dialog';
@@ -586,7 +603,7 @@ export function ChannelsActionDialog({
   showModelsPanel = false,
   onOpenModelMapping,
 }: Props) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const isEdit = !!currentRow;
   const isDuplicate = !!duplicateFromRow && !isEdit;
   const initialRow: Channel | undefined = currentRow || duplicateFromRow;
@@ -637,16 +654,42 @@ export function ChannelsActionDialog({
   const [showClearAllPopover, setShowClearAllPopover] = useState(false);
   const [applyPatternFilter, setApplyPatternFilter] = useState(false);
   const hasAutoSetDuplicateNameRef = useRef(false);
+  const [credentialBaselineUpdatedAt, setCredentialBaselineUpdatedAt] = useState<string | undefined>(() =>
+    isEdit ? currentRow?.updatedAt : undefined
+  );
+  const [credentialConflictNotice, setCredentialConflictNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open && isEdit) {
+      setCredentialBaselineUpdatedAt(currentRow?.updatedAt);
+      setCredentialConflictNotice(null);
+    } else if (!open) {
+      setCredentialConflictNotice(null);
+    }
+    // Freeze the optimistic-lock baseline when the edit dialog opens for this channel;
+    // updating it on background currentRow refreshes would defeat stale-form detection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, isEdit, currentRow?.id]);
   const codexThirdPartyBaseURLRef = useRef('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [showCommandCodeAuthCookie, setShowCommandCodeAuthCookie] = useState(false);
   const [showOllamaAuthCookie, setShowOllamaAuthCookie] = useState(false);
   const [showApiKeysPanel, setShowApiKeysPanel] = useState(false);
   const [apiKeysSearch, setApiKeysSearch] = useState('');
-  const [selectedKeysToRemove, setSelectedKeysToRemove] = useState<Set<string>>(new Set());
-  const [confirmRemoveSelectedOpen, setConfirmRemoveSelectedOpen] = useState(false);
-  const [confirmRemoveKey, setConfirmRemoveKey] = useState<string | null>(null);
-  const [confirmDisableKey, setConfirmDisableKey] = useState<string | null>(null);
+  const [selectedApiKeys, setSelectedApiKeys] = useState<Set<string>>(new Set());
+  const [pendingDeleteKeys, setPendingDeleteKeys] = useState<Set<string>>(new Set());
+  const [pendingEnableKeys, setPendingEnableKeys] = useState<Set<string>>(new Set());
+  const [pendingDisableKeys, setPendingDisableKeys] = useState<Set<string>>(new Set());
+  const [apiKeyNamesDirty, setApiKeyNamesDirty] = useState(false);
+  const [editingApiKeyNameKey, setEditingApiKeyNameKey] = useState<string | null>(null);
+  const [editingApiKeyNameValue, setEditingApiKeyNameValue] = useState('');
+  const [editingApiKeyNameError, setEditingApiKeyNameError] = useState<string | null>(null);
+  const skipSidebarNameBlurRef = useRef(false);
+  const [showAddKeyForm, setShowAddKeyForm] = useState(false);
+  const [newSidebarKey, setNewSidebarKey] = useState('');
+  const [newSidebarKeyName, setNewSidebarKeyName] = useState('');
+  const [newSidebarKeyVisible, setNewSidebarKeyVisible] = useState(false);
+  const [newSidebarKeyError, setNewSidebarKeyError] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>(() => getSavedAuthMode(initialRow) ?? 'official');
   const [codexAuthJSONText, setCodexAuthJSONText] = useState(() => getSavedCodexAuthJSONText(initialRow));
   const [xaiSSOToken, setXaiSSOToken] = useState('');
@@ -861,6 +904,20 @@ export function ChannelsActionDialog({
     const savedAuthMode = getSavedAuthMode(initialRow);
     if (savedAuthMode) setAuthMode(savedAuthMode);
     if (initialRow.type === 'codex') setCodexAuthJSONText(getSavedCodexAuthJSONText(initialRow));
+
+    setPendingDeleteKeys(new Set());
+    setPendingEnableKeys(new Set());
+    setPendingDisableKeys(new Set());
+    setApiKeyNamesDirty(false);
+    setSelectedApiKeys(new Set());
+    setEditingApiKeyNameKey(null);
+    setEditingApiKeyNameValue('');
+    setEditingApiKeyNameError(null);
+    setShowAddKeyForm(false);
+    setNewSidebarKey('');
+    setNewSidebarKeyName('');
+    setNewSidebarKeyVisible(false);
+    setNewSidebarKeyError(null);
   }, [initialRow]);
 
   useEffect(() => {
@@ -894,10 +951,19 @@ export function ChannelsActionDialog({
       setShowOllamaAuthCookie(false);
       setShowApiKeysPanel(false);
       setApiKeysSearch('');
-      setSelectedKeysToRemove(new Set());
-      setConfirmRemoveSelectedOpen(false);
-      setConfirmRemoveKey(null);
-      setConfirmDisableKey(null);
+      setSelectedApiKeys(new Set());
+      setPendingDeleteKeys(new Set());
+      setPendingEnableKeys(new Set());
+      setPendingDisableKeys(new Set());
+      setApiKeyNamesDirty(false);
+      setEditingApiKeyNameKey(null);
+      setEditingApiKeyNameValue('');
+      setEditingApiKeyNameError(null);
+      setShowAddKeyForm(false);
+      setNewSidebarKey('');
+      setNewSidebarKeyName('');
+      setNewSidebarKeyVisible(false);
+      setNewSidebarKeyError(null);
       setPatternError(null);
       resetFetchedCatalog();
       setShowSupportedModelsPanel(false);
@@ -1032,7 +1098,7 @@ export function ChannelsActionDialog({
             type: currentRow.type,
             baseURL: getInitialBaseURL(currentRow),
             name: currentRow.name,
-            policies: currentRow.policies ?? { stream: 'unlimited' },
+            policies: currentRow.policies ?? { stream: 'unlimited' as const },
             supportedModels: currentRow.supportedModels,
             autoSyncSupportedModels: currentRow.autoSyncSupportedModels,
             autoSyncModelPattern: currentRow.autoSyncModelPattern || '',
@@ -1043,9 +1109,9 @@ export function ChannelsActionDialog({
               // OAuth 类型的凭据存储在 apiKey 字段，不放入 apiKeys
               apiKey: currentRow.credentials?.apiKey || undefined,
               apiKeys: currentRow.credentials?.apiKeys || [],
+              apiKeyNames: currentRow.credentials?.apiKeyNames || [],
               vertexApiKeys: currentRow.type === 'gemini_vertex' ? (currentRow.credentials?.vertexApiKeys ?? undefined) : [],
-              vertexServiceAccounts:
-                currentRow.type === 'gemini_vertex' ? (currentRow.credentials?.vertexServiceAccounts ?? undefined) : [],
+              vertexServiceAccounts: currentRow.type === 'gemini_vertex' ? (currentRow.credentials?.vertexServiceAccounts ?? undefined) : [],
               managementApiKey: currentRow.credentials?.managementApiKey || undefined,
               gcp: {
                 region: currentRow.credentials?.gcp?.region || '',
@@ -1072,6 +1138,7 @@ export function ChannelsActionDialog({
                 // OAuth 类型的凭据存储在 apiKey 字段，不放入 apiKeys
                 apiKey: duplicateFromRow.credentials?.apiKey || undefined,
                 apiKeys: duplicateFromRow.credentials?.apiKeys || [],
+                apiKeyNames: duplicateFromRow.credentials?.apiKeyNames || [],
                 vertexApiKeys: duplicateFromRow.type === 'gemini_vertex' ? (duplicateFromRow.credentials?.vertexApiKeys ?? undefined) : [],
                 vertexServiceAccounts:
                   duplicateFromRow.type === 'gemini_vertex'
@@ -1092,6 +1159,7 @@ export function ChannelsActionDialog({
               policies: { stream: 'unlimited' },
               credentials: {
                 apiKeys: [],
+                apiKeyNames: [],
                 vertexApiKeys: [],
                 vertexServiceAccounts: [],
                 managementApiKey: undefined,
@@ -1151,6 +1219,9 @@ export function ChannelsActionDialog({
     useGeminiVertex,
     useAnthropicAws,
     useKimiCoding,
+    pendingDeleteKeys: Array.from(pendingDeleteKeys).sort(),
+    pendingEnableKeys: Array.from(pendingEnableKeys).sort(),
+    pendingDisableKeys: Array.from(pendingDisableKeys).sort(),
   });
   const initialLocalSettings = useRef(localSettingsSnapshot);
   useEffect(() => {
@@ -1174,23 +1245,57 @@ export function ChannelsActionDialog({
   // operator explicitly reopens it; new and blank rows start revealed.
   const [revealedServiceAccountIds, setRevealedServiceAccountIds] = useState<Set<string>>(new Set());
   const apiKeys = form.watch('credentials.apiKeys');
-  const apiKeysCount = useMemo(() => (apiKeys || []).filter((k) => k.trim().length > 0).length, [apiKeys]);
+  const watchedApiKeyNames = form.watch('credentials.apiKeyNames');
+  const apiKeysCount = useMemo(() => getDeduplicatedValidKeys(apiKeys).length, [apiKeys]);
   const isSubmitting = createChannel.isPending || duplicateChannel.isPending || updateChannelSettings.isPending;
 
-  const { data: disabledKeys = [], isFetching: isFetchingDisabledKeys } = useChannelDisabledAPIKeys(currentRow?.id || '', {
-    enabled: isEdit && !!currentRow?.id && showApiKeysPanel,
+  const { data: disabledKeys = EMPTY_DISABLED_API_KEYS } = useChannelDisabledAPIKeys(currentRow?.id || '', {
+    enabled: open && isEdit && !!currentRow?.id,
   });
 
-  const disabledKeySet = useMemo(() => new Set(disabledKeys.map((dk) => dk.key)), [disabledKeys]);
+  const activeDisabledKeys = useMemo(
+    () => filterActiveDisabledAPIKeys(disabledKeys),
+    [disabledKeys]
+  );
+  const serverDisabledMap = useMemo(() => new Map(activeDisabledKeys.map((dk) => [dk.key, dk])), [activeDisabledKeys]);
+  const disabledKeySet = useMemo(() => new Set(activeDisabledKeys.map((dk) => dk.key)), [activeDisabledKeys]);
 
-  // Keys that exist in the backend (used to hide disable/enable button for unsaved new keys)
+  // Keys that exist in the backend baseline (used to distinguish saved keys vs unsaved drafts)
   const savedAPIKeySet = useMemo(
     () => new Set((currentRow?.credentials?.apiKeys || []).filter((k) => k.trim().length > 0)),
     [currentRow?.credentials?.apiKeys]
   );
 
-  const disableAPIKey = useDisableChannelAPIKey();
-  const enableAPIKey = useEnableChannelAPIKey();
+  const sidebarSummary = useMemo(
+    () =>
+      computeSidebarDraftSummary({
+        rawApiKeys: apiKeys,
+        apiKeyNames: watchedApiKeyNames,
+        search: apiKeysSearch,
+        savedKeySet: savedAPIKeySet,
+        serverDisabledMap,
+        pendingDeleteKeys,
+        pendingEnableKeys,
+        pendingDisableKeys,
+        selectedKeys: selectedApiKeys,
+      }),
+    [
+      apiKeys,
+      watchedApiKeyNames,
+      apiKeysSearch,
+      savedAPIKeySet,
+      serverDisabledMap,
+      pendingDeleteKeys,
+      pendingEnableKeys,
+      pendingDisableKeys,
+      selectedApiKeys,
+    ]
+  );
+
+  const staleApiKeyNamesCount = useMemo(
+    () => countStaleAPIKeyNames(watchedApiKeyNames, sidebarSummary.validKeys),
+    [watchedApiKeyNames, sidebarSummary.validKeys]
+  );
 
   useEffect(() => {
     if (!open || !isDuplicate || !duplicateFromRow) return;
@@ -1690,8 +1795,53 @@ export function ChannelsActionDialog({
     }
 
     try {
+      const targetChannelType = isEdit ? values.type || currentRow?.type : derivedChannelType;
+      const isOAuthSubmitMode =
+        (targetChannelType === 'codex' && (authMode === 'official' || authMode === 'auth-json')) ||
+        (targetChannelType === 'claudecode' && authMode === 'official') ||
+        targetChannelType === 'antigravity' ||
+        targetChannelType === 'github_copilot' ||
+        targetChannelType === 'xai_subscription';
+
       if (values.credentials?.apiKeys) {
-        values.credentials.apiKeys = [...new Set(values.credentials.apiKeys.map((key) => key.trim()).filter((key) => key.length > 0))];
+        const dedupedKeys = getDeduplicatedValidKeys(values.credentials.apiKeys);
+        const filteredKeys =
+          pendingDeleteKeys.size > 0
+            ? dedupedKeys.filter((key) => !pendingDeleteKeys.has(key))
+            : dedupedKeys;
+        if (dedupedKeys.length > 0 && filteredKeys.length === 0) {
+          toast.error(t('channels.dialogs.fields.apiKey.mustKeepOne'));
+          return;
+        }
+        if (isEdit && filteredKeys.length > 0 && !isOAuthSubmitMode && targetChannelType !== 'gemini_vertex') {
+          const nextEnabledCount = filteredKeys.filter((key) => {
+            if (!savedAPIKeySet.has(key)) {
+              return true;
+            }
+            const isServerDisabled = disabledKeySet.has(key);
+            if (isServerDisabled) {
+              return pendingEnableKeys.has(key);
+            }
+            return !pendingDisableKeys.has(key);
+          }).length;
+          const hasPendingDisableOnFiltered = filteredKeys.some(
+            (key) => savedAPIKeySet.has(key) && !disabledKeySet.has(key) && pendingDisableKeys.has(key)
+          );
+          const hadServerEnabledKey = Array.from(savedAPIKeySet).some((key) => !disabledKeySet.has(key));
+          if (nextEnabledCount === 0 && (hasPendingDisableOnFiltered || hadServerEnabledKey)) {
+            toast.error(t('channels.dialogs.fields.apiKey.mustKeepOneEnabled'));
+            return;
+          }
+        }
+        values.credentials.apiKeys = filteredKeys;
+        if (isOAuthSubmitMode || targetChannelType === 'gemini_vertex' || (isEdit && !apiKeyNamesDirty)) {
+          values.credentials.apiKeyNames = undefined;
+        } else {
+          // Keep [] explicit when empty so UpdateChannel replaces instead of preserving stale names.
+          values.credentials.apiKeyNames = normalizeAPIKeyNamesForKeys(values.credentials.apiKeyNames, filteredKeys);
+        }
+      } else if (values.credentials?.apiKeyNames) {
+        values.credentials.apiKeyNames = undefined;
       }
 
       const retryableStatusCodes = parseRetryableStatusCodesInput(retryableStatusCodesText);
@@ -1763,6 +1913,7 @@ export function ChannelsActionDialog({
               ...submittedCredentials,
               apiKey: undefined,
               apiKeys: undefined,
+              apiKeyNames: undefined,
               vertexApiKeys: vertexApiKeys
                 ?.filter((credential) => credential.apiKey.trim().length > 0 || credential.projectID.trim().length > 0)
                 .map((credential) => ({
@@ -1919,11 +2070,25 @@ export function ChannelsActionDialog({
           delete updateInput.credentials;
         }
 
+        const apiKeyStateChanges = buildAPIKeyStateChanges({
+          effectiveKeys: values.credentials?.apiKeys ?? [],
+          savedKeySet: savedAPIKeySet,
+          serverDisabledKeySet: disabledKeySet,
+          pendingEnableKeys,
+          pendingDisableKeys,
+        });
+
+        const hasCredentialsDraft = Boolean(updateInput.credentials) || Boolean(apiKeyStateChanges);
         await updateChannelSettings.mutateAsync({
           id: currentRow.id,
           input: updateInput,
           patch: settingsPatch,
+          apiKeyStateChanges,
+          ...(hasCredentialsDraft && credentialBaselineUpdatedAt
+            ? { expectedUpdatedAt: credentialBaselineUpdatedAt }
+            : {}),
         });
+        setCredentialConflictNotice(null);
         toast.success(t('channels.messages.updateSuccess'));
       } else {
         const proxyConfig = {
@@ -1989,9 +2154,24 @@ export function ChannelsActionDialog({
       form.reset();
       setSupportedModels([]);
       setManualModels([]);
+      setPendingDeleteKeys(new Set());
+      setPendingEnableKeys(new Set());
+      setPendingDisableKeys(new Set());
+      setApiKeyNamesDirty(false);
+      setSelectedApiKeys(new Set());
+      setEditingApiKeyNameKey(null);
+      setEditingApiKeyNameValue('');
+      setEditingApiKeyNameError(null);
+      setShowAddKeyForm(false);
+      setNewSidebarKey('');
+      setNewSidebarKeyName('');
+      setNewSidebarKeyVisible(false);
+      setNewSidebarKeyError(null);
       onOpenChange(false);
-    } catch (_error) {
-      void _error;
+    } catch (error) {
+      if (isErrorCode(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
+        setCredentialConflictNotice(t('channels.dialogs.edit.concurrentUpdateConflict'));
+      }
     }
   };
 
@@ -2299,31 +2479,186 @@ export function ChannelsActionDialog({
 
   const closeApiKeysPanel = useCallback(() => {
     setShowApiKeysPanel(false);
+    setShowApiKey(false);
     setApiKeysSearch('');
-    setSelectedKeysToRemove(new Set());
-    setConfirmRemoveSelectedOpen(false);
-    setConfirmRemoveKey(null);
-    setConfirmDisableKey(null);
+    setSelectedApiKeys(new Set());
+    setEditingApiKeyNameKey(null);
+    setEditingApiKeyNameValue('');
+    setEditingApiKeyNameError(null);
+    setShowAddKeyForm(false);
+    setNewSidebarKey('');
+    setNewSidebarKeyName('');
+    setNewSidebarKeyVisible(false);
+    setNewSidebarKeyError(null);
   }, []);
 
-  const removeApiKeys = useCallback(
-    (keysToRemove: string[]) => {
-      const currentKeys = form.getValues('credentials.apiKeys') || [];
-      const keysToRemoveSet = new Set(keysToRemove.map((key) => key.trim()));
-      const validNextKeys = currentKeys.map((key) => key.trim()).filter((key) => key.length > 0 && !keysToRemoveSet.has(key));
-      if (validNextKeys.length === 0) {
+  const markKeysPendingDelete = useCallback(
+    (keysToDelete: string[]) => {
+      if (keysToDelete.length === 0) return;
+      const deleteSet = new Set(keysToDelete.map((k) => k.trim()).filter(Boolean));
+      const remainingRows = sidebarSummary.rows.filter((row) => !row.isPendingDelete && !deleteSet.has(row.key));
+      if (remainingRows.length === 0) {
         toast.error(t('channels.dialogs.fields.apiKey.mustKeepOne'));
-        setConfirmRemoveSelectedOpen(false);
-        setConfirmRemoveKey(null);
         return;
       }
-      form.setValue('credentials.apiKeys', validNextKeys, { shouldDirty: true, shouldTouch: true });
-      setSelectedKeysToRemove(new Set());
-      setConfirmRemoveSelectedOpen(false);
-      setConfirmRemoveKey(null);
+      if (sidebarSummary.effectiveEnabledCount > 0 && remainingRows.filter((row) => row.isEffectiveEnabled).length === 0) {
+        toast.error(t('channels.dialogs.fields.apiKey.mustKeepOneEnabled'));
+        return;
+      }
+      setPendingDeleteKeys((prev) => {
+        const next = new Set(prev);
+        deleteSet.forEach((key) => next.add(key));
+        return next;
+      });
+      setPendingEnableKeys((prev) => {
+        const next = new Set(prev);
+        deleteSet.forEach((key) => next.delete(key));
+        return next;
+      });
+      setPendingDisableKeys((prev) => {
+        const next = new Set(prev);
+        deleteSet.forEach((key) => next.delete(key));
+        return next;
+      });
+      setSelectedApiKeys((prev) => {
+        const next = new Set(prev);
+        deleteSet.forEach((key) => next.delete(key));
+        return next;
+      });
     },
-    [form, t]
+    [sidebarSummary.effectiveEnabledCount, sidebarSummary.rows, t]
   );
+
+  const undoDeleteApiKey = useCallback((key: string) => {
+    setPendingDeleteKeys((prev) => {
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+
+  const markKeysDraftEnabled = useCallback(
+    (keysToEnable: string[]) => {
+      if (keysToEnable.length === 0) return;
+      setPendingEnableKeys((prev) => {
+        const next = new Set(prev);
+        for (const key of keysToEnable) {
+          if (serverDisabledMap.has(key)) {
+            next.add(key);
+          } else {
+            next.delete(key);
+          }
+        }
+        return next;
+      });
+      setPendingDisableKeys((prev) => {
+        const next = new Set(prev);
+        for (const key of keysToEnable) {
+          next.delete(key);
+        }
+        return next;
+      });
+    },
+    [serverDisabledMap]
+  );
+
+  const markKeysDraftDisabled = useCallback(
+    (keysToDisable: string[]) => {
+      if (keysToDisable.length === 0) return;
+      const disableSet = new Set(keysToDisable);
+      const remainingEnabled = sidebarSummary.rows.filter(
+        (row) => !row.isPendingDelete && row.isEffectiveEnabled && !disableSet.has(row.key)
+      ).length;
+      if (remainingEnabled < 1) {
+        toast.error(t('channels.dialogs.fields.apiKey.mustKeepOneEnabled'));
+        return;
+      }
+      setPendingDisableKeys((prev) => {
+        const next = new Set(prev);
+        for (const key of keysToDisable) {
+          if (!serverDisabledMap.has(key)) {
+            next.add(key);
+          } else {
+            next.delete(key);
+          }
+        }
+        return next;
+      });
+      setPendingEnableKeys((prev) => {
+        const next = new Set(prev);
+        for (const key of keysToDisable) {
+          next.delete(key);
+        }
+        return next;
+      });
+    },
+    [serverDisabledMap, sidebarSummary.rows, t]
+  );
+
+  const startEditingSidebarKeyName = useCallback((key: string, currentName: string) => {
+    skipSidebarNameBlurRef.current = false;
+    setEditingApiKeyNameKey(key);
+    setEditingApiKeyNameValue(currentName);
+    setEditingApiKeyNameError(null);
+  }, []);
+
+  const cancelEditingSidebarKeyName = useCallback(() => {
+    setEditingApiKeyNameKey(null);
+    setEditingApiKeyNameValue('');
+    setEditingApiKeyNameError(null);
+  }, []);
+
+  const confirmEditingSidebarKeyName = useCallback(
+    (key: string) => {
+      const check = validateAPIKeyName(editingApiKeyNameValue);
+      if (check.tooLong) {
+        setEditingApiKeyNameError(t('channels.dialogs.fields.apiKey.nameTooLong', { max: MAX_API_KEY_NAME_LENGTH }));
+        return;
+      }
+      const existingNames = form.getValues('credentials.apiKeyNames');
+      const existingName = getAPIKeyNameMap(existingNames).get(key) ?? '';
+      if (check.normalized !== existingName) {
+        setApiKeyNamesDirty(true);
+      }
+      const nextNames = setAPIKeyName(existingNames, key, check.normalized);
+      form.setValue('credentials.apiKeyNames', nextNames, { shouldDirty: true, shouldTouch: true });
+      cancelEditingSidebarKeyName();
+    },
+    [cancelEditingSidebarKeyName, editingApiKeyNameValue, form, t]
+  );
+
+  const handleAddSidebarKey = useCallback(() => {
+    const res = validateNewSidebarKey(newSidebarKey, newSidebarKeyName, sidebarSummary.validKeys);
+    if (res.error === 'emptyKey') {
+      setNewSidebarKeyError(t('channels.dialogs.fields.apiKey.addKeyEmptyError'));
+      return;
+    }
+    if (res.error === 'multilineKey') {
+      setNewSidebarKeyError(t('channels.dialogs.fields.apiKey.addKeyMultilineError'));
+      return;
+    }
+    if (res.error === 'duplicateKey') {
+      setNewSidebarKeyError(t('channels.dialogs.fields.apiKey.addKeyDuplicateError'));
+      return;
+    }
+    if (res.error === 'nameTooLong') {
+      setNewSidebarKeyError(t('channels.dialogs.fields.apiKey.nameTooLong', { max: MAX_API_KEY_NAME_LENGTH }));
+      return;
+    }
+
+    const nextKeys = [...sidebarSummary.validKeys, res.trimmedKey];
+    form.setValue('credentials.apiKeys', nextKeys, { shouldDirty: true, shouldTouch: true });
+    if (res.trimmedName) {
+      setApiKeyNamesDirty(true);
+      const nextNames = setAPIKeyName(form.getValues('credentials.apiKeyNames'), res.trimmedKey, res.trimmedName);
+      form.setValue('credentials.apiKeyNames', nextNames, { shouldDirty: true, shouldTouch: true });
+    }
+    setNewSidebarKey('');
+    setNewSidebarKeyName('');
+    setNewSidebarKeyVisible(false);
+    setNewSidebarKeyError(null);
+    setShowAddKeyForm(false);
+  }, [form, newSidebarKey, newSidebarKeyName, sidebarSummary.validKeys, t]);
 
   // Remove deprecated models (models in supportedModels but not in fetchedModels and not manual)
   const removeDeprecatedModels = useCallback(() => {
@@ -2400,11 +2735,21 @@ export function ChannelsActionDialog({
     setApplyPatternFilter(false);
     setSupportedModelsExpanded(false);
     setApiKeysSearch('');
-    setSelectedKeysToRemove(new Set());
-    setConfirmRemoveSelectedOpen(false);
-    setConfirmRemoveKey(null);
-    setConfirmDisableKey(null);
+    setSelectedApiKeys(new Set());
+    setPendingDeleteKeys(new Set());
+    setPendingEnableKeys(new Set());
+    setPendingDisableKeys(new Set());
+    setApiKeyNamesDirty(false);
+    setEditingApiKeyNameKey(null);
+    setEditingApiKeyNameValue('');
+    setEditingApiKeyNameError(null);
+    setShowAddKeyForm(false);
+    setNewSidebarKey('');
+    setNewSidebarKeyName('');
+    setNewSidebarKeyVisible(false);
+    setNewSidebarKeyError(null);
     setShowApiKey(false);
+    setCredentialConflictNotice(null);
     // Reset proxy state
     if (initialRow?.settings?.proxy?.type) {
       setProxyType(initialRow.settings.proxy.type as ProxyType);
@@ -2480,6 +2825,12 @@ export function ChannelsActionDialog({
               {isEdit ? t('channels.dialogs.edit.description') : t('channels.dialogs.create.description')}
             </DialogDescription>
           </DialogHeader>
+          {credentialConflictNotice && (
+            <div className='border-destructive/50 bg-destructive/10 text-destructive flex flex-shrink-0 items-start gap-2 rounded-md border px-3 py-2 text-xs'>
+              <AlertTriangle className='mt-0.5 h-4 w-4 shrink-0' />
+              <span>{credentialConflictNotice}</span>
+            </div>
+          )}
           <div className='flex min-h-0 flex-1 overflow-hidden md:gap-4'>
             {/* Main Form Section */}
             <div
@@ -3397,29 +3748,43 @@ export function ChannelsActionDialog({
                                         </TooltipContent>
                                       </Tooltip>
                                       <div className='absolute top-2 right-2 flex flex-col gap-1'>
-                                        <Button
-                                          type='button'
-                                          variant='ghost'
-                                          size='sm'
-                                          className='h-7 w-7 p-0'
-                                          onClick={() => {
-                                            const next = !showApiKey;
-                                            setShowApiKey(next);
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <Button
+                                              type='button'
+                                              variant='ghost'
+                                              size='sm'
+                                              className='h-7 w-7 p-0'
+                                              aria-label={
+                                                showApiKey
+                                                  ? t('channels.dialogs.fields.apiKey.doneTooltip')
+                                                  : t('channels.dialogs.fields.apiKey.editTooltip')
+                                              }
+                                              onClick={() => {
+                                                const next = !showApiKey;
+                                                setShowApiKey(next);
 
-                                            if (!next) {
-                                              setShowApiKeysPanel(false);
-                                              return;
-                                            }
+                                                if (!next) {
+                                                  setShowApiKeysPanel(false);
+                                                  return;
+                                                }
 
-                                            if (next) {
-                                              setShowApiKeysPanel(true);
-                                              setShowFetchedModelsPanel(false);
-                                              setShowSupportedModelsPanel(false);
-                                            }
-                                          }}
-                                        >
-                                          {showApiKey ? <EyeOff className='h-4 w-4' /> : <Eye className='h-4 w-4' />}
-                                        </Button>
+                                                setShowApiKeysPanel(true);
+                                                setShowFetchedModelsPanel(false);
+                                                setShowSupportedModelsPanel(false);
+                                              }}
+                                            >
+                                              {showApiKey ? <Check className='h-4 w-4' /> : <Pencil className='h-4 w-4' />}
+                                            </Button>
+                                          </TooltipTrigger>
+                                          <TooltipContent>
+                                            <p>
+                                              {showApiKey
+                                                ? t('channels.dialogs.fields.apiKey.doneTooltip')
+                                                : t('channels.dialogs.fields.apiKey.editTooltip')}
+                                            </p>
+                                          </TooltipContent>
+                                        </Tooltip>
                                         <Button
                                           type='button'
                                           variant='ghost'
@@ -3445,7 +3810,7 @@ export function ChannelsActionDialog({
                                       </p>
                                     </div>
                                   ) : (
-                                    <>
+                                    <div className='relative'>
                                       <Textarea
                                         value={field.value?.join('\n') || ''}
                                         onChange={(e) => {
@@ -3454,15 +3819,51 @@ export function ChannelsActionDialog({
                                         }}
                                         onBlur={() => field.onBlur()}
                                         placeholder={t('channels.dialogs.fields.apiKey.placeholder')}
-                                        className='min-h-[80px] resize-y font-mono text-sm md:col-span-6'
+                                        className='min-h-[80px] resize-y pr-10 font-mono text-sm md:col-span-6'
                                         autoComplete='new-password'
                                         data-form-type='other'
                                         spellCheck={false}
                                         aria-invalid={!!fieldState.error}
                                         data-testid='channel-api-key-input'
                                       />
-                                      <p className='text-muted-foreground text-xs'>{t('channels.dialogs.fields.apiKey.multiLineHint')}</p>
-                                    </>
+                                      <div className='absolute top-2 right-2 flex flex-col gap-1'>
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <Button
+                                              type='button'
+                                              variant='ghost'
+                                              size='sm'
+                                              className='h-7 w-7 p-0'
+                                              aria-label={t('channels.dialogs.fields.apiKey.panelTitle', { count: apiKeysCount })}
+                                              onClick={() => {
+                                                const next = !showApiKeysPanel;
+                                                setShowApiKeysPanel(next);
+                                                if (next) {
+                                                  setShowFetchedModelsPanel(false);
+                                                  setShowSupportedModelsPanel(false);
+                                                }
+                                              }}
+                                            >
+                                              {showApiKeysPanel ? <Check className='h-4 w-4' /> : <Pencil className='h-4 w-4' />}
+                                            </Button>
+                                          </TooltipTrigger>
+                                          <TooltipContent>
+                                            <p>
+                                              {showApiKeysPanel
+                                                ? t('channels.dialogs.fields.apiKey.doneTooltip')
+                                                : t('channels.dialogs.fields.apiKey.panelTitle', { count: apiKeysCount })}
+                                            </p>
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      </div>
+                                      <p className='text-muted-foreground mt-1 text-xs'>{t('channels.dialogs.fields.apiKey.multiLineHint')}</p>
+                                    </div>
+                                  )}
+                                  {staleApiKeyNamesCount > 0 && (
+                                    <p className='flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400'>
+                                      <AlertTriangle className='h-3.5 w-3.5 shrink-0' />
+                                      <span>{t('channels.dialogs.fields.apiKey.staleNamesWarning', { count: staleApiKeyNamesCount })}</span>
+                                    </p>
                                   )}
                                   <FormMessage />
                                 </div>
@@ -4433,166 +4834,280 @@ export function ChannelsActionDialog({
 
                 <p className='text-muted-foreground mb-3 text-xs'>{t('channels.dialogs.fields.apiKey.panelDescription')}</p>
 
-                {/* Search */}
-                <div className='relative mb-3'>
-                  <Search className='text-muted-foreground absolute top-1/2 left-2 h-4 w-4 -translate-y-1/2' />
-                  <Input
-                    placeholder={t('channels.dialogs.fields.apiKey.searchPlaceholder')}
-                    value={apiKeysSearch}
-                    onChange={(e) => setApiKeysSearch(e.target.value)}
-                    className='h-8 pl-8 text-sm'
+                {/* Search + Select All */}
+                <div className='mb-2 flex items-center gap-2'>
+                  <Checkbox
+                    checked={
+                      sidebarSummary.allFilteredSelected
+                        ? true
+                        : sidebarSummary.someFilteredSelected
+                          ? 'indeterminate'
+                          : false
+                    }
+                    onCheckedChange={(checked) => {
+                      const filteredKeys = sidebarSummary.filteredRows.map((row) => row.key);
+                      setSelectedApiKeys((prev) => {
+                        const next = new Set(prev);
+                        if (checked) {
+                          filteredKeys.forEach((k) => next.add(k));
+                        } else {
+                          filteredKeys.forEach((k) => next.delete(k));
+                        }
+                        return next;
+                      });
+                    }}
+                    aria-label={t('common.columns.selectAll')}
+                    disabled={sidebarSummary.filteredRows.length === 0}
                   />
+                  <div className='relative flex-1'>
+                    <Search className='text-muted-foreground absolute top-1/2 left-2 h-4 w-4 -translate-y-1/2' />
+                    <Input
+                      placeholder={t('channels.dialogs.fields.apiKey.searchPlaceholder')}
+                      value={apiKeysSearch}
+                      onChange={(e) => setApiKeysSearch(e.target.value)}
+                      className='h-8 pl-8 text-sm'
+                    />
+                  </div>
                 </div>
 
                 {/* Keys List */}
                 <ScrollArea className='min-h-0 flex-1' type='always'>
                   <div className='space-y-1 pr-3'>
-                    {(() => {
-                      const validKeys = [...new Set((apiKeys || []).map((key) => key.trim()).filter((key) => key.length > 0))];
-                      const isLastKey = validKeys.length <= 1;
-                      const enabledKeysCount = validKeys.filter((k) => savedAPIKeySet.has(k) && !disabledKeySet.has(k)).length;
-                      return validKeys
-                        .filter((k) => {
-                          if (!apiKeysSearch.trim()) return true;
-                          const search = apiKeysSearch.trim().toLowerCase();
-                          return k.toLowerCase().includes(search) || k.slice(-4).toLowerCase().includes(search);
-                        })
-                        .map((key) => {
-                          const isSelected = selectedKeysToRemove.has(key);
-                          const isDisabled = disabledKeySet.has(key);
-                          const isSavedKey = savedAPIKeySet.has(key);
-                          const masked = key.length > 8 ? `${key.slice(0, 4)}****${key.slice(-4)}` : `****${key.slice(-4)}`;
+                    {sidebarSummary.filteredRows.map((row) => {
+                      const key = row.key;
+                      const isSelected = selectedApiKeys.has(key);
+                      const isEditingName = editingApiKeyNameKey === key;
+                      const masked = maskAPIKey(key);
+                      const expiresAt = row.disabledRecord?.expiresAt ? new Date(row.disabledRecord.expiresAt) : null;
+                      const hasValidExpiry = Boolean(expiresAt && expiresAt.getTime() > Date.now());
+                      const disabledTooltipParts: string[] = [];
+                      if (row.disabledRecord?.reason) {
+                        disabledTooltipParts.push(row.disabledRecord.reason);
+                      }
+                      if (row.disabledRecord?.disabledAt) {
+                        disabledTooltipParts.push(
+                          t('channels.dialogs.fields.apiKey.disabledAtLabel', {
+                            time: format(new Date(row.disabledRecord.disabledAt), 'yyyy-MM-dd HH:mm:ss'),
+                          })
+                        );
+                      }
 
-                          return (
-                            <div key={key} className='hover:bg-accent flex items-center justify-between gap-2 rounded-md p-2 text-sm'>
-                              <div className='flex min-w-0 items-center gap-2'>
-                                <Checkbox
-                                  checked={isSelected}
-                                  disabled={isLastKey}
-                                  onCheckedChange={(checked) => {
-                                    setSelectedKeysToRemove((prev) => {
-                                      const next = new Set(prev);
-                                      if (checked) {
-                                        next.add(key);
-                                      } else {
-                                        next.delete(key);
-                                      }
-                                      return next;
-                                    });
-                                  }}
-                                  aria-label={t('common.columns.selectRow')}
-                                />
+                      return (
+                        <div
+                          key={key}
+                          className={`hover:bg-accent rounded-md p-2 text-sm ${row.isPendingDelete ? 'opacity-60' : ''}`}
+                        >
+                          <div className='flex items-start justify-between gap-2'>
+                            <div className='flex min-w-0 flex-1 items-start gap-2'>
+                              <Checkbox
+                                className='mt-1'
+                                checked={isSelected}
+                                onCheckedChange={(checked) => {
+                                  setSelectedApiKeys((prev) => {
+                                    const next = new Set(prev);
+                                    if (checked) {
+                                      next.add(key);
+                                    } else {
+                                      next.delete(key);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                aria-label={t('common.columns.selectRow')}
+                              />
 
-                                <div className='min-w-0'>
-                                  <div className='flex min-w-0 items-center gap-2'>
-                                    <code className='bg-muted shrink-0 rounded px-2 py-0.5 font-mono text-xs'>{masked}</code>
-                                    {isDisabled && (
-                                      <Badge variant='destructive' className='h-5 px-2 text-[10px]'>
-                                        {t('channels.dialogs.fields.apiKey.disabled')}
-                                      </Badge>
-                                    )}
-                                  </div>
-                                  {isDisabled && (
-                                    <p className='text-muted-foreground mt-1 text-xs'>{t('channels.dialogs.fields.apiKey.disabledHint')}</p>
+                              <div className='min-w-0 flex-1 space-y-1'>
+                                <div className='flex min-w-0 flex-wrap items-center gap-1.5'>
+                                  {isEditingName ? (
+                                    <div className='w-full space-y-1'>
+                                      <Input
+                                        value={editingApiKeyNameValue}
+                                        placeholder={row.fallbackName}
+                                        onChange={(e) => {
+                                          setEditingApiKeyNameValue(e.target.value);
+                                          if (editingApiKeyNameError) {
+                                            setEditingApiKeyNameError(null);
+                                          }
+                                        }}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            skipSidebarNameBlurRef.current = true;
+                                            confirmEditingSidebarKeyName(key);
+                                          } else if (e.key === 'Escape') {
+                                            e.preventDefault();
+                                            skipSidebarNameBlurRef.current = true;
+                                            cancelEditingSidebarKeyName();
+                                          }
+                                        }}
+                                        onBlur={() => {
+                                          if (skipSidebarNameBlurRef.current) {
+                                            skipSidebarNameBlurRef.current = false;
+                                            return;
+                                          }
+                                          confirmEditingSidebarKeyName(key);
+                                        }}
+                                        autoFocus
+                                        className='h-6 px-2 text-xs'
+                                      />
+                                      {editingApiKeyNameError && (
+                                        <p className='text-destructive text-[11px]'>{editingApiKeyNameError}</p>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <>
+                                      <button
+                                        type='button'
+                                        onClick={() => startEditingSidebarKeyName(key, row.customName)}
+                                        className={`max-w-[140px] truncate text-left text-xs ${
+                                          row.isPendingDelete ? 'line-through' : ''
+                                        } ${row.customName ? 'font-medium text-foreground' : 'text-muted-foreground'}`}
+                                        title={row.customName || row.fallbackName}
+                                      >
+                                        {row.customName || row.fallbackName}
+                                      </button>
+                                      {row.hasDuplicateName && (
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <AlertTriangle className='h-3 w-3 shrink-0 text-amber-500' />
+                                          </TooltipTrigger>
+                                          <TooltipContent>
+                                            <p>{t('channels.dialogs.fields.apiKey.duplicateNameWarning')}</p>
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      )}
+                                      <code
+                                        className={`bg-muted shrink-0 rounded px-1.5 py-0.5 font-mono text-xs ${
+                                          row.isPendingDelete ? 'line-through' : ''
+                                        }`}
+                                      >
+                                        {masked}
+                                      </code>
+                                      {row.isPendingDelete && (
+                                        <Badge variant='outline' className='h-5 border-destructive/50 px-1.5 text-[10px] text-destructive'>
+                                          {t('channels.dialogs.fields.apiKey.pendingDelete')}
+                                        </Badge>
+                                      )}
+                                      {!row.isPendingDelete && !row.isSaved && (
+                                        <Badge variant='outline' className='h-5 px-1.5 text-[10px]'>
+                                          {t('channels.dialogs.fields.apiKey.unsaved')}
+                                        </Badge>
+                                      )}
+                                      {!row.isPendingDelete && row.isPendingEnable && (
+                                        <Badge variant='secondary' className='h-5 px-1.5 text-[10px]'>
+                                          {t('channels.dialogs.fields.apiKey.pendingEnable')}
+                                        </Badge>
+                                      )}
+                                      {!row.isPendingDelete && row.isPendingDisable && (
+                                        <Badge variant='outline' className='h-5 border-orange-500/50 px-1.5 text-[10px] text-orange-600'>
+                                          {t('channels.dialogs.fields.apiKey.pendingDisable')}
+                                        </Badge>
+                                      )}
+                                      {!row.isPendingDelete && row.isServerDisabled && !row.isPendingEnable && (
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <Badge variant='destructive' className='h-5 px-1.5 text-[10px]'>
+                                              {t('channels.dialogs.fields.apiKey.disabled')}
+                                            </Badge>
+                                          </TooltipTrigger>
+                                          {disabledTooltipParts.length > 0 && (
+                                            <TooltipContent>
+                                              <p className='max-w-xs break-words'>{disabledTooltipParts.join(' · ')}</p>
+                                            </TooltipContent>
+                                          )}
+                                        </Tooltip>
+                                      )}
+                                    </>
                                   )}
                                 </div>
-                              </div>
 
-                              <div className='flex items-center gap-1'>
-                                {/* Disable / Enable button — only for keys saved in backend */}
-                                {isSavedKey &&
-                                  (isDisabled ? (
-                                    <Popover
-                                      open={confirmDisableKey === key}
-                                      onOpenChange={(isOpen) => setConfirmDisableKey(isOpen ? key : null)}
-                                    >
-                                      <PopoverTrigger asChild>
-                                        <Button type='button' variant='ghost' size='sm' className='h-7 w-7 p-0'>
-                                          <RefreshCw className='h-4 w-4' />
-                                        </Button>
-                                      </PopoverTrigger>
-                                      <PopoverContent className='w-72'>
-                                        <div className='flex flex-col gap-3'>
-                                          <p className='text-sm'>{t('channels.dialogs.fields.apiKey.confirmEnable')}</p>
-                                          <div className='flex justify-end gap-2'>
-                                            <Button size='sm' variant='outline' onClick={() => setConfirmDisableKey(null)}>
-                                              {t('common.buttons.cancel')}
-                                            </Button>
-                                            <Button
-                                              size='sm'
-                                              onClick={async () => {
-                                                if (!currentRow?.id) return;
-                                                await enableAPIKey.mutateAsync({ channelID: currentRow.id, key });
-                                                setConfirmDisableKey(null);
-                                              }}
-                                            >
-                                              {t('common.buttons.confirm')}
-                                            </Button>
-                                          </div>
-                                        </div>
-                                      </PopoverContent>
-                                    </Popover>
-                                  ) : enabledKeysCount <= 1 ? (
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <span className='inline-flex'>
+                                {!row.isPendingDelete && row.isServerDisabled && !row.isPendingEnable && row.disabledRecord && (
+                                  <div className='text-muted-foreground flex flex-wrap items-center gap-1 text-[11px]'>
+                                    {row.disabledRecord.reason && (
+                                      <span className='max-w-[160px] truncate'>{row.disabledRecord.reason}</span>
+                                    )}
+                                    {row.disabledRecord.errorCode !== 0 && (
+                                      <span>· {t('channels.dialogs.fields.apiKey.errorCodeBadge', { code: row.disabledRecord.errorCode })}</span>
+                                    )}
+                                    {row.disabledRecord.quotaDisabled && (
+                                      <span>· {t('channels.dialogs.keyManagement.quotaDisabled')}</span>
+                                    )}
+                                    {hasValidExpiry && expiresAt && (
+                                      <span className='text-blue-500'>
+                                        ·{' '}
+                                        {t('channels.dialogs.disabledAPIKeys.expiresIn', {
+                                          time: formatDistanceToNow(expiresAt, {
+                                            addSuffix: false,
+                                            locale: i18n.language.startsWith('zh') ? zhCN : enUS,
+                                          }),
+                                        })}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className='flex shrink-0 items-center gap-0.5'>
+                              {row.isPendingDelete ? (
+                                <Button
+                                  type='button'
+                                  variant='ghost'
+                                  size='sm'
+                                  className='h-7 px-2 text-xs'
+                                  onClick={() => undoDeleteApiKey(key)}
+                                >
+                                  <Undo2 className='mr-1 h-3.5 w-3.5' />
+                                  {t('channels.dialogs.fields.apiKey.undo')}
+                                </Button>
+                              ) : (
+                                <>
+                                  {row.isSaved &&
+                                    (row.isEffectiveDisabled ? (
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
                                           <Button
                                             type='button'
                                             variant='ghost'
                                             size='sm'
-                                            className='text-muted-foreground h-7 w-7 p-0'
-                                            disabled
+                                            className='h-7 w-7 p-0'
+                                            aria-label={t('channels.dialogs.fields.apiKey.enable')}
+                                            onClick={() => markKeysDraftEnabled([key])}
                                           >
-                                            <Ban className='h-4 w-4' />
+                                            <CircleCheck className='h-4 w-4' />
                                           </Button>
-                                        </span>
-                                      </TooltipTrigger>
-                                      <TooltipContent>
-                                        <p>{t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')}</p>
-                                      </TooltipContent>
-                                    </Tooltip>
-                                  ) : (
-                                    <Popover
-                                      open={confirmDisableKey === key}
-                                      onOpenChange={(isOpen) => setConfirmDisableKey(isOpen ? key : null)}
-                                    >
-                                      <PopoverTrigger asChild>
-                                        <Button
-                                          type='button'
-                                          variant='ghost'
-                                          size='sm'
-                                          className='h-7 w-7 p-0 text-orange-500'
-                                          disabled={disableAPIKey.isPending || isFetchingDisabledKeys}
-                                        >
-                                          <Ban className='h-4 w-4' />
-                                        </Button>
-                                      </PopoverTrigger>
-                                      <PopoverContent className='w-72'>
-                                        <div className='flex flex-col gap-3'>
-                                          <p className='text-sm'>{t('channels.dialogs.fields.apiKey.confirmDisable')}</p>
-                                          <div className='flex justify-end gap-2'>
-                                            <Button size='sm' variant='outline' onClick={() => setConfirmDisableKey(null)}>
-                                              {t('common.buttons.cancel')}
-                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                          <p>{t('channels.dialogs.fields.apiKey.enable')}</p>
+                                        </TooltipContent>
+                                      </Tooltip>
+                                    ) : (
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <span className='inline-flex'>
                                             <Button
+                                              type='button'
+                                              variant='ghost'
                                               size='sm'
-                                              disabled={disableAPIKey.isPending || isFetchingDisabledKeys}
-                                              onClick={async () => {
-                                                if (!currentRow?.id) return;
-                                                await disableAPIKey.mutateAsync({ channelID: currentRow.id, key });
-                                                setConfirmDisableKey(null);
-                                              }}
+                                              className={`h-7 w-7 p-0 ${row.disableBlockedByLastEnabled ? 'text-muted-foreground' : 'text-orange-500'}`}
+                                              aria-label={t('channels.dialogs.fields.apiKey.disable')}
+                                              disabled={!row.canDisable}
+                                              onClick={() => markKeysDraftDisabled([key])}
                                             >
-                                              {t('common.buttons.confirm')}
+                                              <Ban className='h-4 w-4' />
                                             </Button>
-                                          </div>
-                                        </div>
-                                      </PopoverContent>
-                                    </Popover>
-                                  ))}
+                                          </span>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                          <p>
+                                            {row.disableBlockedByLastEnabled
+                                              ? t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')
+                                              : t('channels.dialogs.fields.apiKey.disable')}
+                                          </p>
+                                        </TooltipContent>
+                                      </Tooltip>
+                                    ))}
 
-                                {/* Delete button */}
-                                {isLastKey ? (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <span className='inline-flex'>
@@ -4600,92 +5115,195 @@ export function ChannelsActionDialog({
                                           type='button'
                                           variant='ghost'
                                           size='sm'
-                                          className='text-muted-foreground h-7 w-7 p-0'
-                                          disabled
+                                          className={`h-7 w-7 p-0 ${row.canDelete ? 'text-destructive' : 'text-muted-foreground'}`}
+                                          aria-label={t('channels.dialogs.fields.apiKey.delete')}
+                                          disabled={!row.canDelete}
+                                          onClick={() => markKeysPendingDelete([key])}
                                         >
                                           <Trash2 className='h-4 w-4' />
                                         </Button>
                                       </span>
                                     </TooltipTrigger>
                                     <TooltipContent>
-                                      <p>{t('channels.dialogs.fields.apiKey.mustKeepOne')}</p>
+                                      <p>
+                                        {row.deleteBlockedByLastKey
+                                          ? t('channels.dialogs.fields.apiKey.mustKeepOne')
+                                          : row.deleteBlockedByLastEnabled
+                                            ? t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')
+                                            : t('channels.dialogs.fields.apiKey.delete')}
+                                      </p>
                                     </TooltipContent>
                                   </Tooltip>
-                                ) : (
-                                  <Popover
-                                    open={confirmRemoveKey === key}
-                                    onOpenChange={(isOpen) => setConfirmRemoveKey(isOpen ? key : null)}
-                                  >
-                                    <PopoverTrigger asChild>
-                                      <Button type='button' variant='ghost' size='sm' className='text-destructive h-7 w-7 p-0'>
-                                        <Trash2 className='h-4 w-4' />
-                                      </Button>
-                                    </PopoverTrigger>
-                                    <PopoverContent className='w-72'>
-                                      <div className='flex flex-col gap-3'>
-                                        <p className='text-sm'>{t('channels.dialogs.fields.apiKey.confirmRemoveSingle')}</p>
-                                        <div className='flex justify-end gap-2'>
-                                          <Button size='sm' variant='outline' onClick={() => setConfirmRemoveKey(null)}>
-                                            {t('common.buttons.cancel')}
-                                          </Button>
-                                          <Button size='sm' variant='destructive' onClick={() => removeApiKeys([key])}>
-                                            {t('common.buttons.confirm')}
-                                          </Button>
-                                        </div>
-                                      </div>
-                                    </PopoverContent>
-                                  </Popover>
-                                )}
-                              </div>
+                                </>
+                              )}
                             </div>
-                          );
-                        });
-                    })()}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </ScrollArea>
 
-                {/* Action Buttons */}
-                <div className='mt-2 flex gap-2 border-t pt-2'>
-                  <Popover open={confirmRemoveSelectedOpen} onOpenChange={setConfirmRemoveSelectedOpen}>
-                    <PopoverTrigger asChild>
-                      <Button type='button' variant='destructive' size='sm' className='flex-1' disabled={selectedKeysToRemove.size === 0}>
-                        <Trash2 className='mr-1 h-4 w-4' />
-                        {t('channels.dialogs.fields.apiKey.removeSelected', { count: selectedKeysToRemove.size })}
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className='w-80' align='end'>
-                      <div className='flex flex-col gap-3'>
-                        <p className='text-sm'>
-                          {t('channels.dialogs.fields.apiKey.confirmRemoveSelected', { count: selectedKeysToRemove.size })}
-                        </p>
-                        <div className='flex justify-end gap-2'>
-                          <Button size='sm' variant='outline' onClick={() => setConfirmRemoveSelectedOpen(false)}>
-                            {t('common.buttons.cancel')}
-                          </Button>
-                          <Button size='sm' variant='destructive' onClick={() => removeApiKeys(Array.from(selectedKeysToRemove))}>
-                            {t('common.buttons.confirm')}
-                          </Button>
-                        </div>
+                {/* Add Key Section */}
+                <div className='mt-2 border-t pt-2'>
+                  {showAddKeyForm ? (
+                    <div className='space-y-2 rounded-md border bg-muted/30 p-2'>
+                      <Input
+                        value={newSidebarKeyName}
+                        placeholder={t('channels.dialogs.fields.apiKey.namePlaceholder')}
+                        onChange={(e) => {
+                          setNewSidebarKeyName(e.target.value);
+                          if (newSidebarKeyError) setNewSidebarKeyError(null);
+                        }}
+                        className='h-8 text-xs'
+                      />
+                      <div className='relative'>
+                        <Input
+                          type={newSidebarKeyVisible ? 'text' : 'password'}
+                          value={newSidebarKey}
+                          placeholder={t('channels.dialogs.fields.apiKey.addKeyInputPlaceholder')}
+                          onChange={(e) => {
+                            setNewSidebarKey(e.target.value);
+                            if (newSidebarKeyError) setNewSidebarKeyError(null);
+                          }}
+                          onPaste={(e) => {
+                            const pasted = e.clipboardData?.getData('text') ?? '';
+                            if (containsMultilineKey(pasted)) {
+                              e.preventDefault();
+                              setNewSidebarKeyError(t('channels.dialogs.fields.apiKey.addKeyMultilineError'));
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleAddSidebarKey();
+                            }
+                          }}
+                          className='h-8 pr-8 font-mono text-xs'
+                        />
+                        <Button
+                          type='button'
+                          variant='ghost'
+                          size='sm'
+                          className='absolute top-0.5 right-0.5 h-7 w-7 p-0'
+                          onClick={() => setNewSidebarKeyVisible((v) => !v)}
+                        >
+                          {newSidebarKeyVisible ? <EyeOff className='h-3.5 w-3.5' /> : <Eye className='h-3.5 w-3.5' />}
+                        </Button>
                       </div>
-                    </PopoverContent>
-                  </Popover>
+                      {newSidebarKeyError && <p className='text-destructive text-xs'>{newSidebarKeyError}</p>}
+                      <div className='flex justify-end gap-2'>
+                        <Button
+                          type='button'
+                          variant='outline'
+                          size='sm'
+                          onClick={() => {
+                            setShowAddKeyForm(false);
+                            setNewSidebarKey('');
+                            setNewSidebarKeyName('');
+                            setNewSidebarKeyVisible(false);
+                            setNewSidebarKeyError(null);
+                          }}
+                        >
+                          {t('common.buttons.cancel')}
+                        </Button>
+                        <Button type='button' size='sm' onClick={handleAddSidebarKey}>
+                          {t('channels.dialogs.buttons.add')}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <Button
+                      type='button'
+                      variant='outline'
+                      size='sm'
+                      className='w-full'
+                      onClick={() => setShowAddKeyForm(true)}
+                    >
+                      <Plus className='mr-1 h-4 w-4' />
+                      {t('channels.dialogs.fields.apiKey.addKeyButton')}
+                    </Button>
+                  )}
+                </div>
 
+                {/* Batch Action Buttons */}
+                <div className='mt-2 flex flex-wrap gap-1.5 border-t pt-2'>
                   <Button
                     type='button'
                     variant='outline'
                     size='sm'
                     className='flex-1'
-                    onClick={() => {
-                      setSelectedKeysToRemove(new Set());
-                      setConfirmRemoveSelectedOpen(false);
-                      setConfirmRemoveKey(null);
-                      setConfirmDisableKey(null);
-                    }}
-                    disabled={selectedKeysToRemove.size === 0}
+                    disabled={sidebarSummary.batchEnableKeys.length === 0}
+                    onClick={() => markKeysDraftEnabled(sidebarSummary.batchEnableKeys)}
+                  >
+                    <CircleCheck className='mr-1 h-3.5 w-3.5' />
+                    {t('channels.dialogs.fields.apiKey.enableSelected', { count: sidebarSummary.batchEnableKeys.length })}
+                  </Button>
+
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className='inline-flex flex-1'>
+                        <Button
+                          type='button'
+                          variant='outline'
+                          size='sm'
+                          className='w-full'
+                          disabled={!sidebarSummary.canBatchDisable}
+                          onClick={() => markKeysDraftDisabled(sidebarSummary.batchDisableKeys)}
+                        >
+                          <Ban className='mr-1 h-3.5 w-3.5' />
+                          {t('channels.dialogs.fields.apiKey.disableSelected', { count: sidebarSummary.batchDisableKeys.length })}
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    {!sidebarSummary.canBatchDisable && sidebarSummary.batchDisableKeys.length > 0 && (
+                      <TooltipContent>
+                        <p>{t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')}</p>
+                      </TooltipContent>
+                    )}
+                  </Tooltip>
+
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className='inline-flex flex-1'>
+                        <Button
+                          type='button'
+                          variant='destructive'
+                          size='sm'
+                          className='w-full'
+                          disabled={!sidebarSummary.canBatchDelete}
+                          onClick={() => markKeysPendingDelete(sidebarSummary.batchDeleteKeys)}
+                        >
+                          <Trash2 className='mr-1 h-3.5 w-3.5' />
+                          {t('channels.dialogs.fields.apiKey.removeSelected', { count: sidebarSummary.batchDeleteKeys.length })}
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    {!sidebarSummary.canBatchDelete && sidebarSummary.batchDeleteKeys.length > 0 && (
+                      <TooltipContent>
+                        <p>
+                          {sidebarSummary.batchDeleteBlockedByLastKey
+                            ? t('channels.dialogs.fields.apiKey.mustKeepOne')
+                            : t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')}
+                        </p>
+                      </TooltipContent>
+                    )}
+                  </Tooltip>
+
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    onClick={() => setSelectedApiKeys(new Set())}
+                    disabled={selectedApiKeys.size === 0}
                   >
                     {t('channels.dialogs.fields.apiKey.clearSelection')}
                   </Button>
                 </div>
+
+                <p className='text-muted-foreground mt-2 text-center text-[11px]'>
+                  {t('channels.dialogs.fields.apiKey.saveToApplyHint')}
+                </p>
               </div>
 
               {/* Supported Models Panel Content */}
@@ -4816,7 +5434,14 @@ export function ChannelsActionDialog({
             </div>
           </div>
           <DialogFooter pinned>
-            <Button type='button' variant='outline' onClick={() => onOpenChange(false)}>
+            <Button
+              type='button'
+              variant='outline'
+              onClick={() => {
+                resetDialogState();
+                onOpenChange(false);
+              }}
+            >
               {t('common.buttons.cancel')}
             </Button>
             <Button

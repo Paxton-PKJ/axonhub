@@ -620,6 +620,7 @@ var schemaGraph = func() *sqlgraph.Schema {
 			requestexecution.FieldFormat:                     {Type: field.TypeString, Column: requestexecution.FieldFormat},
 			requestexecution.FieldReasoningEffort:            {Type: field.TypeString, Column: requestexecution.FieldReasoningEffort},
 			requestexecution.FieldChannelAPIKeySuffix:        {Type: field.TypeString, Column: requestexecution.FieldChannelAPIKeySuffix},
+			requestexecution.FieldChannelAPIKeyFingerprint:   {Type: field.TypeString, Column: requestexecution.FieldChannelAPIKeyFingerprint},
 			requestexecution.FieldRequestBody:                {Type: field.TypeJSON, Column: requestexecution.FieldRequestBody},
 			requestexecution.FieldRequestBodyChunked:         {Type: field.TypeBool, Column: requestexecution.FieldRequestBodyChunked},
 			requestexecution.FieldResponseHeaders:            {Type: field.TypeJSON, Column: requestexecution.FieldResponseHeaders},
@@ -4524,6 +4525,11 @@ func (f *RequestExecutionFilter) WhereReasoningEffort(p entql.StringP) {
 // WhereChannelAPIKeySuffix applies the entql string predicate on the channel_api_key_suffix field.
 func (f *RequestExecutionFilter) WhereChannelAPIKeySuffix(p entql.StringP) {
 	f.Where(p.Field(requestexecution.FieldChannelAPIKeySuffix))
+}
+
+// WhereChannelAPIKeyFingerprint applies the entql string predicate on the channel_api_key_fingerprint field.
+func (f *RequestExecutionFilter) WhereChannelAPIKeyFingerprint(p entql.StringP) {
+	f.Where(p.Field(requestexecution.FieldChannelAPIKeyFingerprint))
 }
 
 // WhereRequestBody applies the entql json.RawMessage predicate on the request_body field.

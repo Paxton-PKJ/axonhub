@@ -41,7 +41,12 @@ function buildRequestsQuery(permissions: { canViewApiKeys: boolean; canViewChann
                     id
                     name
                   }
-                  channelAPIKeyIndex`
+                  channelAPIKeyIndex
+                  channelAPIKeyLabel {
+                    name
+                    index
+                    deleted
+                  }`
     : '';
 
   return `
@@ -237,7 +242,12 @@ function buildRequestExecutionsQuery(permissions: { canViewChannels: boolean }) 
                   baseURL
               }
               channelAPIKeySuffix
-              channelAPIKeyIndex`
+              channelAPIKeyIndex
+              channelAPIKeyLabel {
+                name
+                index
+                deleted
+              }`
     : '';
 
   return `

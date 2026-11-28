@@ -30,6 +30,7 @@ import { generateRequestCurl, generateExecutionCurl } from '../utils/curl-genera
 import { getRealtimeAuditRecordKind } from '../utils/realtime-record';
 import { getVideoLastFrameURL, isVideoRequestFormat } from '../utils/video-display';
 import { getExecutionModelAuditVerdict, MODEL_AUDIT_VERDICT_CLASS } from '../utils/upstream-model-audit';
+import { resolveRequestDetailAPIKeyDisplay } from '../utils/api-key-label';
 
 // The detail page renders whole request and response payloads. Expanding every
 // level eagerly produces hundreds of thousands of characters of DOM for a large
@@ -856,6 +857,7 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                   {executions.edges.map((edge: any, index: number) => {
                     const execution = edge.node;
                     const modelVerdict = getExecutionModelAuditVerdict(execution, t);
+                    const apiKeyDisplay = resolveRequestDetailAPIKeyDisplay(execution);
                     return (
                       <Card key={execution.id} className='bg-muted/20 border-0 shadow-sm'>
                         <CardHeader className='pb-4'>
@@ -886,15 +888,15 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                               <p className='text-muted-foreground font-mono text-sm'>
                                 {execution.channel?.name || t('requests.columns.unknown')}
                               </p>
-                              {(execution.channelAPIKeySuffix || execution.channelAPIKeyIndex != null) && (
+                              {apiKeyDisplay.visible && (
                                 <div className='flex items-center gap-1.5 text-xs text-muted-foreground pt-0.5'>
                                   <Key className='h-3.5 w-3.5 shrink-0' />
                                   <span>{t('requests.columns.upstreamApiKey')}</span>
-                                  {execution.channelAPIKeyIndex != null && (
-                                    <span className='font-mono'>key{execution.channelAPIKeyIndex}</span>
+                                  {apiKeyDisplay.label && (
+                                    <span className='font-mono'>{apiKeyDisplay.label}</span>
                                   )}
-                                  {execution.channelAPIKeySuffix && (
-                                    <span className='font-mono'>••••{execution.channelAPIKeySuffix}</span>
+                                  {apiKeyDisplay.suffix && (
+                                    <span className='font-mono'>••••{apiKeyDisplay.suffix}</span>
                                   )}
                                 </div>
                               )}

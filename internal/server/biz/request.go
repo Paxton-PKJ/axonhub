@@ -651,10 +651,15 @@ func (s *RequestService) CreateRequestExecution(
 			mut = mut.SetReasoningEffort(*reasoningEffort)
 		}
 
-		// Record which channel credential served this execution. Both facts are read
-		// from the key actually sent upstream, which is known here while the
-		// credentials are still at hand.
-		if apiKey, ok := contexts.GetChannelAPIKey(ctx); ok {
+		// Record which channel credential served this execution. OAuth takes
+		// precedence over any ambient channel key left in the retry container from
+		// an earlier non-OAuth attempt; otherwise the suffix/index/fingerprint are
+		// derived from the key actually sent upstream.
+		if channel.Credentials.IsOAuth() {
+			if fp := objects.CredentialFingerprint(objects.OAuthCredentialRef); fp != "" {
+				mut = mut.SetChannelAPIKeyFingerprint(fp)
+			}
+		} else if apiKey, ok := contexts.GetChannelAPIKey(ctx); ok && apiKey != "" {
 			runes := []rune(apiKey)
 			if len(runes) > 4 {
 				mut = mut.SetChannelAPIKeySuffix(string(runes[len(runes)-4:]))
@@ -669,6 +674,10 @@ func (s *RequestService) CreateRequestExecution(
 				if idx := slices.Index(allKeys, apiKey); idx >= 0 {
 					mut = mut.SetChannelAPIKeyIndex(idx + 1)
 				}
+			}
+
+			if fp := objects.CredentialFingerprint(apiKey); fp != "" {
+				mut = mut.SetChannelAPIKeyFingerprint(fp)
 			}
 		}
 

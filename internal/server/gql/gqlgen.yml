@@ -397,6 +397,15 @@ models:
   VertexAPIKeyInput:
     model:
       - github.com/looplj/axonhub/internal/objects.VertexAPIKey
+  APIKeyName:
+    model:
+      - github.com/looplj/axonhub/internal/objects.APIKeyName
+  APIKeyNameInput:
+    model:
+      - github.com/looplj/axonhub/internal/objects.APIKeyName
+  ChannelAPIKeyStateChangesInput:
+    model:
+      - github.com/looplj/axonhub/internal/server/biz.ChannelAPIKeyStateChanges
   ModelIdentify:
     model:
       - github.com/looplj/axonhub/internal/server/biz.ModelIdentify

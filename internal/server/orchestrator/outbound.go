@@ -1006,6 +1006,7 @@ func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
 	}
 
 	p.publishRequestFailover(ctx, leftChannel, leftModel, attempt, candidate.Channel)
+	contexts.ClearChannelAPIKey(ctx)
 
 	return nil
 }
@@ -1121,6 +1122,7 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 	p.state.OutboundStreamTerminal = streamTerminalNone
 
 	p.resetPassThroughStreamState()
+	contexts.ClearChannelAPIKey(ctx)
 
 	// If there's another model in the list, advance to it.
 	if p.state.CurrentModelIndex+1 < len(candidate.Models) {

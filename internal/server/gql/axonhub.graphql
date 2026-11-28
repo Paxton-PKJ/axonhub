@@ -419,10 +419,16 @@ type ChannelRateLimit {
   queueTimeoutMs: Int
 }
 
+type APIKeyName {
+  key: String!
+  name: String!
+}
+
 type ChannelCredentials {
   isOAuth: Boolean!
   apiKey: String
   apiKeys: [String!]
+  apiKeyNames: [APIKeyName!]
   vertexApiKeys: [VertexAPIKey!]
   vertexServiceAccounts: [GCPCredential!]
   gcp: GCPCredential
@@ -464,9 +470,20 @@ type GCPCredential {
   jsonData: String!
 }
 
+input APIKeyNameInput {
+  key: String!
+  name: String!
+}
+
+input ChannelAPIKeyStateChangesInput {
+  enableKeys: [String!]
+  disableKeys: [String!]
+}
+
 input ChannelCredentialsInput {
   apiKey: String
   apiKeys: [String!]
+  apiKeyNames: [APIKeyNameInput!]
   vertexApiKeys: [VertexAPIKeyInput!]
   vertexServiceAccounts: [GCPCredentialInput!]
   gcp: GCPCredentialInput
@@ -920,6 +937,16 @@ extend type Thread {
   archivedTracesCount: Int! @goField(forceResolver: true)
 }
 
+type ChannelAPIKeyLabel {
+  name: String
+  index: Int
+  deleted: Boolean!
+}
+
+extend type RequestExecution {
+  channelAPIKeyLabel: ChannelAPIKeyLabel @goField(forceResolver: true)
+}
+
 extend type Channel {
   """
   Built-in endpoints resolved dynamically from the channel type.
@@ -1085,7 +1112,12 @@ type Mutation {
   createChannel(input: CreateChannelInput!): Channel!
   duplicateChannel(sourceID: ID!, input: CreateChannelInput!): Channel!
   bulkCreateChannels(input: BulkCreateChannelsInput!): [Channel!]!
-  updateChannel(id: ID!, input: UpdateChannelInput!): Channel!
+  updateChannel(
+    id: ID!
+    input: UpdateChannelInput!
+    apiKeyStateChanges: ChannelAPIKeyStateChangesInput
+    expectedUpdatedAt: Time
+  ): Channel!
   updateChannelSettings(id: ID!, input: UpdateChannelSettingsInput!): Channel!
   saveChannelEndpoints(input: SaveChannelEndpointsInput!): Channel!
   detectChannelEndpoints(input: DetectChannelEndpointsInput!): DetectChannelEndpointsPayload!
@@ -1115,6 +1147,7 @@ type Mutation {
   enableChannelAPIKey(channelID: ID!, key: String!): Boolean!
   enableAllChannelAPIKeys(channelID: ID!): Boolean!
   enableSelectedChannelAPIKeys(channelID: ID!, keys: [String!]!): Boolean!
+  disableSelectedChannelAPIKeys(channelID: ID!, keys: [String!]!): Boolean!
   deleteDisabledChannelAPIKeys(
     channelID: ID!
     keys: [String!]!

@@ -43,7 +43,7 @@ func TestChannelQuotaRoutingModeGraphQLRoundTrip(t *testing.T) {
 
 	updated, err := resolver.UpdateChannel(ctx, objects.GUID{Type: "Channel", ID: created.ID}, ent.UpdateChannelInput{
 		Settings: &objects.ChannelSettings{QuotaRoutingMode: objects.QuotaRoutingModeBackpressure},
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Equal(t, objects.QuotaRoutingModeBackpressure, updated.Settings.QuotaRoutingMode)
 

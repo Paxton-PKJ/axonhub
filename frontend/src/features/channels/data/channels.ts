@@ -11,13 +11,16 @@ import { mergeChannelSettingsForUpdate } from '../utils/merge';
 import { shouldNotifyChannelQueryError } from './channel-query-error';
 import {
   Channel,
+  ChannelAPIKeyStateChangesInput,
   ChannelConnection,
   ChannelSummaryConnection,
   CreateChannelInput,
+  DisabledAPIKey,
   UpdateChannelInput,
   channelConnectionSchema,
   channelSchema,
   channelEndpointsResponseSchema,
+  disabledAPIKeySchema,
   BulkImportChannelsInput,
   BulkImportChannelsResult,
   bulkImportChannelsResultSchema,
@@ -529,8 +532,8 @@ const CHANNEL_FIELDS_FRAGMENT = `
 `;
 
 const UPDATE_CHANNEL_MUTATION = `${CHANNEL_FIELDS_FRAGMENT}
-  mutation UpdateChannel($id: ID!, $input: UpdateChannelInput!) {
-    updateChannel(id: $id, input: $input) {
+  mutation UpdateChannel($id: ID!, $input: UpdateChannelInput!, $apiKeyStateChanges: ChannelAPIKeyStateChangesInput, $expectedUpdatedAt: Time) {
+    updateChannel(id: $id, input: $input, apiKeyStateChanges: $apiKeyStateChanges, expectedUpdatedAt: $expectedUpdatedAt) {
       ...ChannelMutationFields
     }
   }
@@ -787,6 +790,12 @@ const ENABLE_ALL_CHANNEL_API_KEYS_MUTATION = `
 const ENABLE_SELECTED_CHANNEL_API_KEYS_MUTATION = `
   mutation EnableSelectedChannelAPIKeys($channelID: ID!, $keys: [String!]!) {
     enableSelectedChannelAPIKeys(channelID: $channelID, keys: $keys)
+  }
+`;
+
+const DISABLE_SELECTED_CHANNEL_API_KEYS_MUTATION = `
+  mutation DisableSelectedChannelAPIKeys($channelID: ID!, $keys: [String!]!) {
+    disableSelectedChannelAPIKeys(channelID: $channelID, keys: $keys)
   }
 `;
 
@@ -1230,6 +1239,10 @@ const CHANNEL_QUERY_FULL_NODE_SELECTION = `
             isOAuth
             apiKey
             apiKeys
+            apiKeyNames {
+              key
+              name
+            }
             vertexApiKeys {
               projectID
               apiKey
@@ -1771,8 +1784,18 @@ export function useBulkCreateChannels() {
   });
 }
 
-async function updateChannelRequest(id: string, input: UpdateChannelInput): Promise<Channel> {
-  const data = await graphqlRequest<{ updateChannel: Channel }>(UPDATE_CHANNEL_MUTATION, { id, input });
+async function updateChannelRequest(
+  id: string,
+  input: UpdateChannelInput,
+  apiKeyStateChanges?: ChannelAPIKeyStateChangesInput,
+  expectedUpdatedAt?: string
+): Promise<Channel> {
+  const data = await graphqlRequest<{ updateChannel: Channel }>(UPDATE_CHANNEL_MUTATION, {
+    id,
+    input,
+    ...(apiKeyStateChanges ? { apiKeyStateChanges } : {}),
+    ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
+  });
   return channelSchema.parse(data.updateChannel);
 }
 
@@ -1784,7 +1807,7 @@ async function updateChannelSettingsRequest(id: string, patch: Partial<ChannelSe
   return channelSchema.parse(data.updateChannelSettings);
 }
 
-async function fetchLatestChannel(channelID: string): Promise<Channel> {
+export async function fetchLatestChannel(channelID: string): Promise<Channel> {
   const data = await graphqlRequest<{ queryChannels: ChannelConnection }>(QUERY_CHANNELS_QUERY, {
     input: {
       first: 1,
@@ -1824,16 +1847,41 @@ export function useUpdateChannel() {
   const { handleError } = useErrorHandler();
 
   return useMutation({
-    mutationFn: async ({ id, input }: { id: string; input: UpdateChannelInput }) => {
-      return updateChannelRequest(id, input);
+    mutationFn: async ({
+      id,
+      input,
+      expectedUpdatedAt,
+    }: {
+      id: string;
+      input: UpdateChannelInput;
+      expectedUpdatedAt?: string;
+    }) => {
+      return updateChannelRequest(id, input, undefined, expectedUpdatedAt);
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
       queryClient.invalidateQueries({ queryKey: ['channel', data.id] });
+      queryClient.invalidateQueries({ queryKey: ['channelDisabledAPIKeys', data.id] });
+      queryClient.invalidateQueries({ queryKey: ['provider-quotas'] });
       toast.success(t('channels.messages.updateSuccess'));
     },
-    onError: (error) => {
-      handleError(error, { context: t('channels.dialogs.edit.title') });
+    onError: (error, variables) => {
+      handleError(error, {
+        context: t('channels.dialogs.edit.title'),
+        onErrorCode: (code) => {
+          if (code === 'MUST_KEEP_ONE_ENABLED_API_KEY') {
+            toast.error(t('channels.dialogs.fields.apiKey.mustKeepOneEnabled'));
+            return true;
+          }
+          if (code === 'CHANNEL_UPDATED_CONCURRENTLY') {
+            queryClient.invalidateQueries({ queryKey: ['channels'] });
+            queryClient.invalidateQueries({ queryKey: ['channel', variables.id] });
+            queryClient.invalidateQueries({ queryKey: ['channelDisabledAPIKeys', variables.id] });
+            toast.error(t('channels.messages.concurrentUpdateConflict'));
+            return true;
+          }
+        },
+      });
     },
   });
 }
@@ -1842,6 +1890,8 @@ export interface UpdateChannelSettingsMutationInput {
   id: string;
   patch: Partial<ChannelSettings>;
   input?: Omit<UpdateChannelInput, 'settings'>;
+  apiKeyStateChanges?: ChannelAPIKeyStateChangesInput;
+  expectedUpdatedAt?: string;
 }
 
 /**
@@ -1868,7 +1918,7 @@ export function useUpdateChannelSettings() {
   const { handleError } = useErrorHandler();
 
   return useMutation({
-    mutationFn: ({ id, patch, input }: UpdateChannelSettingsMutationInput) =>
+    mutationFn: ({ id, patch, input, apiKeyStateChanges, expectedUpdatedAt }: UpdateChannelSettingsMutationInput) =>
       enqueueChannelSettingsUpdate(id, async () => {
         // Settings-only edits go through the server-side patch mutation, which
         // merges under an expected-version guard and retries on conflict. An
@@ -1881,23 +1931,48 @@ export function useUpdateChannelSettings() {
         // clear-capable full-update path, where the client-side merge applies
         // the null.
         const hasExplicitNullClear = Object.values(patch ?? {}).some((value) => value === null);
-        if (!hasChannelFields && !hasExplicitNullClear) {
+        const hasAPIKeyStateChanges = Boolean(
+          (apiKeyStateChanges?.enableKeys?.length ?? 0) > 0 || (apiKeyStateChanges?.disableKeys?.length ?? 0) > 0
+        );
+        if (!hasChannelFields && !hasExplicitNullClear && !hasAPIKeyStateChanges && !expectedUpdatedAt) {
           return updateChannelSettingsRequest(id, patch);
         }
 
         const latest = await fetchLatestChannel(id);
-        return updateChannelRequest(id, {
-          ...input!,
-          settings: mergeChannelSettingsForUpdate(latest.settings, patch),
-        });
+        return updateChannelRequest(
+          id,
+          {
+            ...(input ?? {}),
+            settings: mergeChannelSettingsForUpdate(latest.settings, patch),
+          },
+          apiKeyStateChanges,
+          expectedUpdatedAt
+        );
       }),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
       queryClient.invalidateQueries({ queryKey: ['channel', data.id] });
+      queryClient.invalidateQueries({ queryKey: ['channelDisabledAPIKeys', data.id] });
       queryClient.invalidateQueries({ queryKey: ['provider-quotas'] });
     },
-    onError: (error) => {
-      handleError(error, { context: t('channels.dialogs.edit.title') });
+    onError: (error, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['channelDisabledAPIKeys', variables.id] });
+      handleError(error, {
+        context: t('channels.dialogs.edit.title'),
+        onErrorCode: (code) => {
+          if (code === 'MUST_KEEP_ONE_ENABLED_API_KEY') {
+            toast.error(t('channels.dialogs.fields.apiKey.mustKeepOneEnabled'));
+            return true;
+          }
+          if (code === 'CHANNEL_UPDATED_CONCURRENTLY') {
+            queryClient.invalidateQueries({ queryKey: ['channels'] });
+            queryClient.invalidateQueries({ queryKey: ['channel', variables.id] });
+            queryClient.invalidateQueries({ queryKey: ['channelDisabledAPIKeys', variables.id] });
+            toast.error(t('channels.messages.concurrentUpdateConflict'));
+            return true;
+          }
+        },
+      });
     },
   });
 }
@@ -2268,6 +2343,8 @@ export function useTestChannelAPIKeys(options?: { silent?: boolean }) {
 }
 
 export function useTestChannelAPIKey() {
+  const queryClient = useQueryClient();
+
   return useMutation({
     mutationFn: async ({ channelID, key, modelID }: { channelID: string; key: string; modelID?: string }) => {
       const data = await graphqlRequest<{ testChannelAPIKey: TestAPIKeyResult }>(TEST_CHANNEL_API_KEY_MUTATION, {
@@ -2276,6 +2353,11 @@ export function useTestChannelAPIKey() {
         modelID,
       });
       return testAPIKeyResultSchema.parse(data.testChannelAPIKey);
+    },
+    onSuccess: (data, variables) => {
+      if (data.disabled) {
+        queryClient.invalidateQueries({ queryKey: ['channelDisabledAPIKeys', variables.channelID] });
+      }
     },
   });
 }
@@ -2699,7 +2781,7 @@ export function useChannelDisabledAPIKeys(channelId: string, options?: { enabled
 
   return useQuery({
     queryKey: ['channelDisabledAPIKeys', channelId],
-    queryFn: async () => {
+    queryFn: async (): Promise<DisabledAPIKey[]> => {
       try {
         const data = await graphqlRequest<{
           node: {
@@ -2714,7 +2796,7 @@ export function useChannelDisabledAPIKeys(channelId: string, options?: { enabled
             }>;
           };
         }>(GET_CHANNEL_DISABLED_API_KEYS_QUERY, { id: channelId });
-        return data.node?.disabledAPIKeys || [];
+        return (data.node?.disabledAPIKeys || []).map((item) => disabledAPIKeySchema.parse(item));
       } catch (error) {
         handleError(error, t('common.errors.internalServerError'));
         return [];
@@ -2835,6 +2917,48 @@ export function useEnableSelectedChannelAPIKeys() {
   });
 }
 
+export function useDisableSelectedChannelAPIKeys() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+  const { handleError } = useErrorHandler();
+
+  return useMutation({
+    mutationFn: async ({ channelID, keys }: { channelID: string; keys: string[] }) => {
+      try {
+        const data = await graphqlRequest<{ disableSelectedChannelAPIKeys: boolean }>(DISABLE_SELECTED_CHANNEL_API_KEYS_MUTATION, {
+          channelID,
+          keys,
+        });
+        return data.disableSelectedChannelAPIKeys;
+      } catch (error) {
+        handleError(error, {
+          context: 'Disable Selected API Keys',
+          onErrorCode: (code) => {
+            if (code === 'MUST_KEEP_ONE_ENABLED_API_KEY') {
+              toast.error(t('channels.dialogs.fields.apiKey.mustKeepOneEnabled'));
+              return true;
+            }
+            if (code === 'CHANNEL_UPDATED_CONCURRENTLY') {
+              queryClient.invalidateQueries({ queryKey: ['channelDisabledAPIKeys', channelID] });
+              queryClient.invalidateQueries({ queryKey: ['channels'] });
+              toast.error(t('channels.messages.concurrentUpdateConflict'));
+              return true;
+            }
+          },
+        });
+        throw error;
+      }
+    },
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['channelDisabledAPIKeys', variables.channelID] });
+      queryClient.invalidateQueries({ queryKey: ['channels'] });
+      // Key eligibility feeds the quota popover, so its cache is stale too.
+      queryClient.invalidateQueries({ queryKey: ['provider-quotas'] });
+      toast.success(t('channels.messages.disableSelectedAPIKeysSuccess'));
+    },
+  });
+}
+
 export function useDeleteDisabledChannelAPIKeys() {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
@@ -2856,6 +2980,7 @@ export function useDeleteDisabledChannelAPIKeys() {
     onSuccess: (data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channelDisabledAPIKeys', variables.channelID] });
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['channel', variables.channelID] });
       // Key eligibility feeds the quota popover, so its cache is stale too.
       queryClient.invalidateQueries({ queryKey: ['provider-quotas'] });
 

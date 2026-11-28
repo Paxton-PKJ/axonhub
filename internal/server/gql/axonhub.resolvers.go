@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/contexts"
@@ -65,8 +66,9 @@ func (r *channelResolver) Credentials(ctx context.Context, obj *ent.Channel) (*o
 
 	if obj.Type == channel.TypeAntigravity || creds.IsOAuth() {
 		// For OAuth channels (e.g., antigravity, claudecode, codex), only return single API key.
-		// Clear APIKeys as OAuth only supports single credential.
+		// Clear APIKeys and APIKeyNames as OAuth only supports single credential.
 		creds.APIKeys = nil
+		creds.APIKeyNames = nil
 		return &creds, nil
 	}
 
@@ -78,18 +80,7 @@ func (r *channelResolver) Credentials(ctx context.Context, obj *ent.Channel) (*o
 	// A non-Vertex channel exposes neither form. Legacy rows can still carry a
 	// binding, and leaking it would offer a Google-project key to an unrelated
 	// provider; the key is dropped from apiKeys for the same reason.
-	apiKeys := creds.GetAllAPIKeys()
-	if len(creds.VertexAPIKeys) > 0 {
-		vertexKeys := make(map[string]struct{}, len(creds.VertexAPIKeys))
-		for _, credential := range creds.VertexAPIKeys {
-			vertexKeys[credential.APIKey] = struct{}{}
-		}
-
-		apiKeys = lo.Filter(apiKeys, func(key string, _ int) bool {
-			_, isVertex := vertexKeys[key]
-			return !isVertex
-		})
-	}
+	apiKeys := creds.GetFlatAPIKeys()
 
 	if obj.Type != channel.TypeGeminiVertex {
 		creds.VertexAPIKeys = nil
@@ -100,9 +91,15 @@ func (r *channelResolver) Credentials(ctx context.Context, obj *ent.Channel) (*o
 		apiKeys = nil
 	}
 
-	// For non-OAuth channel types, use api keys array.
+	// For non-OAuth channel types, keep only non-Vertex flat keys in apiKeys.
 	creds.APIKeys = apiKeys
 	creds.APIKey = ""
+	if obj.Type == channel.TypeGeminiVertex {
+		// Vertex credentials do not support per-key names; keep keys isolated from APIKeyNames.
+		creds.APIKeyNames = nil
+	} else {
+		creds.PruneAPIKeyNames(apiKeys)
+	}
 
 	return &creds, nil
 }
@@ -216,8 +213,11 @@ func (r *mutationResolver) BulkCreateChannels(ctx context.Context, input biz.Bul
 }
 
 // UpdateChannel is the resolver for the updateChannel field.
-func (r *mutationResolver) UpdateChannel(ctx context.Context, id objects.GUID, input ent.UpdateChannelInput) (*ent.Channel, error) {
-	return r.channelService.UpdateChannel(ctx, id.ID, &input)
+func (r *mutationResolver) UpdateChannel(ctx context.Context, id objects.GUID, input ent.UpdateChannelInput, apiKeyStateChanges *biz.ChannelAPIKeyStateChanges, expectedUpdatedAt *time.Time) (*ent.Channel, error) {
+	if expectedUpdatedAt != nil {
+		ctx = biz.WithExpectedChannelVersion(ctx, *expectedUpdatedAt)
+	}
+	return r.channelService.UpdateChannel(ctx, id.ID, &input, apiKeyStateChanges)
 }
 
 // UpdateChannelSettings is the resolver for the updateChannelSettings field.
@@ -481,6 +481,15 @@ func (r *mutationResolver) EnableAllChannelAPIKeys(ctx context.Context, channelI
 func (r *mutationResolver) EnableSelectedChannelAPIKeys(ctx context.Context, channelID objects.GUID, keys []string) (bool, error) {
 	if err := r.channelService.EnableSelectedAPIKeys(ctx, channelID.ID, keys); err != nil {
 		return false, fmt.Errorf("failed to enable selected channel API keys: %w", err)
+	}
+
+	return true, nil
+}
+
+// DisableSelectedChannelAPIKeys is the resolver for the disableSelectedChannelAPIKeys field.
+func (r *mutationResolver) DisableSelectedChannelAPIKeys(ctx context.Context, channelID objects.GUID, keys []string) (bool, error) {
+	if err := r.channelService.DisableSelectedAPIKeys(ctx, channelID.ID, keys); err != nil {
+		return false, fmt.Errorf("failed to disable selected channel API keys: %w", err)
 	}
 
 	return true, nil
@@ -1016,6 +1025,11 @@ func (r *queryResolver) APIKeyQuotaUsages(ctx context.Context, apiKeyID objects.
 	}
 
 	return result, nil
+}
+
+// ChannelAPIKeyLabel is the resolver for the channelAPIKeyLabel field.
+func (r *requestExecutionResolver) ChannelAPIKeyLabel(ctx context.Context, obj *ent.RequestExecution) (*ChannelAPIKeyLabel, error) {
+	return resolveChannelAPIKeyLabel(ctx, r.client, obj)
 }
 
 // ID is the resolver for the id field.

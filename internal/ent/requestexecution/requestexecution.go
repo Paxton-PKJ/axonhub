@@ -43,6 +43,8 @@ const (
 	FieldReasoningEffort = "reasoning_effort"
 	// FieldChannelAPIKeySuffix holds the string denoting the channel_api_key_suffix field in the database.
 	FieldChannelAPIKeySuffix = "channel_api_key_suffix"
+	// FieldChannelAPIKeyFingerprint holds the string denoting the channel_api_key_fingerprint field in the database.
+	FieldChannelAPIKeyFingerprint = "channel_api_key_fingerprint"
 	// FieldRequestBody holds the string denoting the request_body field in the database.
 	FieldRequestBody = "request_body"
 	// FieldRequestBodyChunked holds the string denoting the request_body_chunked field in the database.
@@ -129,6 +131,7 @@ var Columns = []string{
 	FieldFormat,
 	FieldReasoningEffort,
 	FieldChannelAPIKeySuffix,
+	FieldChannelAPIKeyFingerprint,
 	FieldRequestBody,
 	FieldRequestBodyChunked,
 	FieldResponseHeaders,
@@ -171,6 +174,8 @@ var (
 	DefaultFormat string
 	// ChannelAPIKeySuffixValidator is a validator for the "channel_api_key_suffix" field. It is called by the builders before save.
 	ChannelAPIKeySuffixValidator func(string) error
+	// ChannelAPIKeyFingerprintValidator is a validator for the "channel_api_key_fingerprint" field. It is called by the builders before save.
+	ChannelAPIKeyFingerprintValidator func(string) error
 	// DefaultRequestBodyChunked holds the default value on creation for the "request_body_chunked" field.
 	DefaultRequestBodyChunked bool
 	// DefaultStream holds the default value on creation for the "stream" field.
@@ -276,6 +281,11 @@ func ByReasoningEffort(opts ...sql.OrderTermOption) OrderOption {
 // ByChannelAPIKeySuffix orders the results by the channel_api_key_suffix field.
 func ByChannelAPIKeySuffix(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldChannelAPIKeySuffix, opts...).ToFunc()
+}
+
+// ByChannelAPIKeyFingerprint orders the results by the channel_api_key_fingerprint field.
+func ByChannelAPIKeyFingerprint(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldChannelAPIKeyFingerprint, opts...).ToFunc()
 }
 
 // ByRequestBodyChunked orders the results by the request_body_chunked field.

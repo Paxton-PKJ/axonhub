@@ -27,6 +27,7 @@ import { DataTableColumnHeader } from '@/components/data-table-column-header';
 import { useGeneralSettings, useSecuritySettings, useUpdateSecuritySettings } from '@/features/system/data/system';
 import { useRequestPermissions } from '../../../hooks/useRequestPermissions';
 import { Request } from '../data/schema';
+import { resolveRequestListAPIKeyLabel } from '../utils/api-key-label';
 import { type MetricColorKey, metricColorTextClass } from '../utils/metric-colors';
 import {
   calculateTokensPerSecond,
@@ -507,16 +508,16 @@ export function useRequestsColumns(options?: UseRequestsColumnsOptions): ColumnD
           },
           {
             id: 'channelAPIKeyIndex',
-            accessorFn: (row) => row.executions?.edges?.[0]?.node?.channelAPIKeyIndex ?? '',
+            accessorFn: (row) => resolveRequestListAPIKeyLabel(row.executions?.edges?.[0]?.node) ?? '',
             header: ({ column }) => <DataTableColumnHeader column={column} title={t('requests.columns.channelAPIKeyIndex')} />,
             enableSorting: false,
             enableHiding: true,
             cell: ({ row }) => {
-              const index = row.original.executions?.edges?.[0]?.node?.channelAPIKeyIndex;
+              const label = resolveRequestListAPIKeyLabel(row.original.executions?.edges?.[0]?.node);
 
-              if (index == null) return <span className='text-muted-foreground font-mono text-xs'>-</span>;
+              if (!label) return <span className='text-muted-foreground font-mono text-xs'>-</span>;
 
-              return <span className='font-mono text-xs'>key{index}</span>;
+              return <span className='font-mono text-xs'>{label}</span>;
             },
           },
         ] as ColumnDef<Request>[])

@@ -60,6 +60,11 @@ const requestListQueryWithChannelAPIKeyIndex = `
                   name
                 }
                 channelAPIKeyIndex
+                channelAPIKeyLabel {
+                  name
+                  index
+                  deleted
+                }
               }
               cursor
             }
@@ -122,6 +127,11 @@ const requestExecutionsQueryWithChannelAPIKeyIndex = `
                 baseURL
               }
               channelAPIKeyIndex
+              channelAPIKeyLabel {
+                name
+                index
+                deleted
+              }
               modelID
               projectID
               dataStorageID

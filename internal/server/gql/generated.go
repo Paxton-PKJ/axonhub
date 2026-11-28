@@ -142,6 +142,11 @@ type ComplexityRoot struct {
 		Node   func(childComplexity int) int
 	}
 
+	APIKeyName struct {
+		Key  func(childComplexity int) int
+		Name func(childComplexity int) int
+	}
+
 	APIKeyProfile struct {
 		ChannelIDs           func(childComplexity int) int
 		ChannelTags          func(childComplexity int) int
@@ -455,6 +460,12 @@ type ComplexityRoot struct {
 		UsageLogs               func(childComplexity int, after *entgql.Cursor[int], first *int, before *entgql.Cursor[int], last *int, orderBy *ent.UsageLogOrder, where *ent.UsageLogWhereInput) int
 	}
 
+	ChannelAPIKeyLabel struct {
+		Deleted func(childComplexity int) int
+		Index   func(childComplexity int) int
+		Name    func(childComplexity int) int
+	}
+
 	ChannelConnection struct {
 		Edges      func(childComplexity int) int
 		PageInfo   func(childComplexity int) int
@@ -463,6 +474,7 @@ type ComplexityRoot struct {
 
 	ChannelCredentials struct {
 		APIKey                func(childComplexity int) int
+		APIKeyNames           func(childComplexity int) int
 		APIKeys               func(childComplexity int) int
 		GCP                   func(childComplexity int) int
 		IsOAuth               func(childComplexity int) int
@@ -1205,6 +1217,7 @@ type ComplexityRoot struct {
 		DetectChannelEndpoints                func(childComplexity int, input biz.DetectChannelEndpointsInput) int
 		DisableChannelAPIKey                  func(childComplexity int, channelID objects.GUID, key string) int
 		DisablePlugin                         func(childComplexity int, id objects.GUID) int
+		DisableSelectedChannelAPIKeys         func(childComplexity int, channelID objects.GUID, keys []string) int
 		DuplicateChannel                      func(childComplexity int, sourceID objects.GUID, input ent.CreateChannelInput) int
 		EnableAllChannelAPIKeys               func(childComplexity int, channelID objects.GUID) int
 		EnableChannelAPIKey                   func(childComplexity int, channelID objects.GUID, key string) int
@@ -1246,7 +1259,7 @@ type ComplexityRoot struct {
 		UpdateAutoBackupSettings              func(childComplexity int, input UpdateAutoBackupSettingsInput) int
 		UpdateBrandSettings                   func(childComplexity int, input UpdateBrandSettingsInput) int
 		UpdateCatalogSettings                 func(childComplexity int, input UpdateCatalogSettingsInput) int
-		UpdateChannel                         func(childComplexity int, id objects.GUID, input ent.UpdateChannelInput) int
+		UpdateChannel                         func(childComplexity int, id objects.GUID, input ent.UpdateChannelInput, apiKeyStateChanges *biz.ChannelAPIKeyStateChanges, expectedUpdatedAt *time.Time) int
 		UpdateChannelOverrideTemplate         func(childComplexity int, id objects.GUID, input ent.UpdateChannelOverrideTemplateInput) int
 		UpdateChannelSettings                 func(childComplexity int, id objects.GUID, input biz.UpdateChannelSettingsInput) int
 		UpdateChannelStatus                   func(childComplexity int, id objects.GUID, status channel.Status) int
@@ -1892,6 +1905,7 @@ type ComplexityRoot struct {
 	RequestExecution struct {
 		Channel                    func(childComplexity int) int
 		ChannelAPIKeyIndex         func(childComplexity int) int
+		ChannelAPIKeyLabel         func(childComplexity int) int
 		ChannelAPIKeySuffix        func(childComplexity int) int
 		ChannelID                  func(childComplexity int) int
 		CreatedAt                  func(childComplexity int) int
@@ -2598,7 +2612,7 @@ type MutationResolver interface {
 	CreateChannel(ctx context.Context, input ent.CreateChannelInput) (*ent.Channel, error)
 	DuplicateChannel(ctx context.Context, sourceID objects.GUID, input ent.CreateChannelInput) (*ent.Channel, error)
 	BulkCreateChannels(ctx context.Context, input biz.BulkCreateChannelsInput) ([]*ent.Channel, error)
-	UpdateChannel(ctx context.Context, id objects.GUID, input ent.UpdateChannelInput) (*ent.Channel, error)
+	UpdateChannel(ctx context.Context, id objects.GUID, input ent.UpdateChannelInput, apiKeyStateChanges *biz.ChannelAPIKeyStateChanges, expectedUpdatedAt *time.Time) (*ent.Channel, error)
 	UpdateChannelSettings(ctx context.Context, id objects.GUID, input biz.UpdateChannelSettingsInput) (*ent.Channel, error)
 	SaveChannelEndpoints(ctx context.Context, input biz.SaveChannelEndpointsInput) (*ent.Channel, error)
 	DetectChannelEndpoints(ctx context.Context, input biz.DetectChannelEndpointsInput) (*biz.DetectChannelEndpointsPayload, error)
@@ -2622,6 +2636,7 @@ type MutationResolver interface {
 	EnableChannelAPIKey(ctx context.Context, channelID objects.GUID, key string) (bool, error)
 	EnableAllChannelAPIKeys(ctx context.Context, channelID objects.GUID) (bool, error)
 	EnableSelectedChannelAPIKeys(ctx context.Context, channelID objects.GUID, keys []string) (bool, error)
+	DisableSelectedChannelAPIKeys(ctx context.Context, channelID objects.GUID, keys []string) (bool, error)
 	DeleteDisabledChannelAPIKeys(ctx context.Context, channelID objects.GUID, keys []string) (*biz.DeleteDisabledAPIKeysResult, error)
 	CreateAPIKey(ctx context.Context, input ent.CreateAPIKeyInput) (*ent.APIKey, error)
 	UpdateAPIKey(ctx context.Context, id objects.GUID, input ent.UpdateAPIKeyInput) (*ent.APIKey, error)
@@ -2897,6 +2912,8 @@ type RequestExecutionResolver interface {
 	ResponseChunks(ctx context.Context, obj *ent.RequestExecution) ([]objects.JSONRawMessage, error)
 
 	Channel(ctx context.Context, obj *ent.RequestExecution) (*ent.Channel, error)
+
+	ChannelAPIKeyLabel(ctx context.Context, obj *ent.RequestExecution) (*ChannelAPIKeyLabel, error)
 }
 type RoleResolver interface {
 	ID(ctx context.Context, obj *ent.Role) (*objects.GUID, error)
@@ -3151,6 +3168,19 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.APIKeyEdge.Node(childComplexity), true
+
+	case "APIKeyName.key":
+		if e.complexity.APIKeyName.Key == nil {
+			break
+		}
+
+		return e.complexity.APIKeyName.Key(childComplexity), true
+	case "APIKeyName.name":
+		if e.complexity.APIKeyName.Name == nil {
+			break
+		}
+
+		return e.complexity.APIKeyName.Name(childComplexity), true
 
 	case "APIKeyProfile.channelIDs":
 		if e.complexity.APIKeyProfile.ChannelIDs == nil {
@@ -4382,6 +4412,25 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.complexity.Channel.UsageLogs(childComplexity, args["after"].(*entgql.Cursor[int]), args["first"].(*int), args["before"].(*entgql.Cursor[int]), args["last"].(*int), args["orderBy"].(*ent.UsageLogOrder), args["where"].(*ent.UsageLogWhereInput)), true
 
+	case "ChannelAPIKeyLabel.deleted":
+		if e.complexity.ChannelAPIKeyLabel.Deleted == nil {
+			break
+		}
+
+		return e.complexity.ChannelAPIKeyLabel.Deleted(childComplexity), true
+	case "ChannelAPIKeyLabel.index":
+		if e.complexity.ChannelAPIKeyLabel.Index == nil {
+			break
+		}
+
+		return e.complexity.ChannelAPIKeyLabel.Index(childComplexity), true
+	case "ChannelAPIKeyLabel.name":
+		if e.complexity.ChannelAPIKeyLabel.Name == nil {
+			break
+		}
+
+		return e.complexity.ChannelAPIKeyLabel.Name(childComplexity), true
+
 	case "ChannelConnection.edges":
 		if e.complexity.ChannelConnection.Edges == nil {
 			break
@@ -4407,6 +4456,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.ChannelCredentials.APIKey(childComplexity), true
+	case "ChannelCredentials.apiKeyNames":
+		if e.complexity.ChannelCredentials.APIKeyNames == nil {
+			break
+		}
+
+		return e.complexity.ChannelCredentials.APIKeyNames(childComplexity), true
 	case "ChannelCredentials.apiKeys":
 		if e.complexity.ChannelCredentials.APIKeys == nil {
 			break
@@ -7601,6 +7656,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Mutation.DisablePlugin(childComplexity, args["id"].(objects.GUID)), true
+	case "Mutation.disableSelectedChannelAPIKeys":
+		if e.complexity.Mutation.DisableSelectedChannelAPIKeys == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_disableSelectedChannelAPIKeys_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.DisableSelectedChannelAPIKeys(childComplexity, args["channelID"].(objects.GUID), args["keys"].([]string)), true
 	case "Mutation.duplicateChannel":
 		if e.complexity.Mutation.DuplicateChannel == nil {
 			break
@@ -8052,7 +8118,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.complexity.Mutation.UpdateChannel(childComplexity, args["id"].(objects.GUID), args["input"].(ent.UpdateChannelInput)), true
+		return e.complexity.Mutation.UpdateChannel(childComplexity, args["id"].(objects.GUID), args["input"].(ent.UpdateChannelInput), args["apiKeyStateChanges"].(*biz.ChannelAPIKeyStateChanges), args["expectedUpdatedAt"].(*time.Time)), true
 	case "Mutation.updateChannelOverrideTemplate":
 		if e.complexity.Mutation.UpdateChannelOverrideTemplate == nil {
 			break
@@ -11294,6 +11360,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.RequestExecution.ChannelAPIKeyIndex(childComplexity), true
+	case "RequestExecution.channelAPIKeyLabel":
+		if e.complexity.RequestExecution.ChannelAPIKeyLabel == nil {
+			break
+		}
+
+		return e.complexity.RequestExecution.ChannelAPIKeyLabel(childComplexity), true
 	case "RequestExecution.channelAPIKeySuffix":
 		if e.complexity.RequestExecution.ChannelAPIKeySuffix == nil {
 			break
@@ -13774,6 +13846,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 	ec := executionContext{opCtx, e, 0, 0, make(chan graphql.DeferredResult)}
 	inputUnmarshalMap := graphql.BuildUnmarshalerMap(
 		ec.unmarshalInputAPIKeyAutoDisableRuleInput,
+		ec.unmarshalInputAPIKeyNameInput,
 		ec.unmarshalInputAPIKeyOrder,
 		ec.unmarshalInputAPIKeyProfileInput,
 		ec.unmarshalInputAPIKeyProfileTemplateOrder,
@@ -13799,6 +13872,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 		ec.unmarshalInputCatalogImportScope,
 		ec.unmarshalInputCatalogImportSelection,
 		ec.unmarshalInputCatalogRouteChoice,
+		ec.unmarshalInputChannelAPIKeyStateChangesInput,
 		ec.unmarshalInputChannelCredentialsInput,
 		ec.unmarshalInputChannelEndpointInput,
 		ec.unmarshalInputChannelModelAssociationInput,
@@ -15133,6 +15207,22 @@ func (ec *executionContext) field_Mutation_disablePlugin_args(ctx context.Contex
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_disableSelectedChannelAPIKeys_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "channelID", ec.unmarshalNID2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐGUID)
+	if err != nil {
+		return nil, err
+	}
+	args["channelID"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "keys", ec.unmarshalNString2ᚕstringᚄ)
+	if err != nil {
+		return nil, err
+	}
+	args["keys"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_duplicateChannel_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -15763,6 +15853,16 @@ func (ec *executionContext) field_Mutation_updateChannel_args(ctx context.Contex
 		return nil, err
 	}
 	args["input"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "apiKeyStateChanges", ec.unmarshalOChannelAPIKeyStateChangesInput2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐChannelAPIKeyStateChanges)
+	if err != nil {
+		return nil, err
+	}
+	args["apiKeyStateChanges"] = arg2
+	arg3, err := graphql.ProcessArgField(ctx, rawArgs, "expectedUpdatedAt", ec.unmarshalOTime2ᚖtimeᚐTime)
+	if err != nil {
+		return nil, err
+	}
+	args["expectedUpdatedAt"] = arg3
 	return args, nil
 }
 
@@ -18957,6 +19057,64 @@ func (ec *executionContext) fieldContext_APIKeyEdge_cursor(_ context.Context, fi
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type Cursor does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _APIKeyName_key(ctx context.Context, field graphql.CollectedField, obj *objects.APIKeyName) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_APIKeyName_key,
+		func(ctx context.Context) (any, error) {
+			return obj.Key, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_APIKeyName_key(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "APIKeyName",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _APIKeyName_name(ctx context.Context, field graphql.CollectedField, obj *objects.APIKeyName) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_APIKeyName_name,
+		func(ctx context.Context) (any, error) {
+			return obj.Name, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_APIKeyName_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "APIKeyName",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
 		},
 	}
 	return fc, nil
@@ -25389,6 +25547,8 @@ func (ec *executionContext) fieldContext_Channel_credentials(_ context.Context, 
 				return ec.fieldContext_ChannelCredentials_apiKey(ctx, field)
 			case "apiKeys":
 				return ec.fieldContext_ChannelCredentials_apiKeys(ctx, field)
+			case "apiKeyNames":
+				return ec.fieldContext_ChannelCredentials_apiKeyNames(ctx, field)
 			case "vertexApiKeys":
 				return ec.fieldContext_ChannelCredentials_vertexApiKeys(ctx, field)
 			case "vertexServiceAccounts":
@@ -25481,6 +25641,93 @@ func (ec *executionContext) fieldContext_Channel_liveLimiterStats(_ context.Cont
 				return ec.fieldContext_ChannelLimiterStats_queueSize(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type ChannelLimiterStats", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ChannelAPIKeyLabel_name(ctx context.Context, field graphql.CollectedField, obj *ChannelAPIKeyLabel) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ChannelAPIKeyLabel_name,
+		func(ctx context.Context) (any, error) {
+			return obj.Name, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_ChannelAPIKeyLabel_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ChannelAPIKeyLabel",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ChannelAPIKeyLabel_index(ctx context.Context, field graphql.CollectedField, obj *ChannelAPIKeyLabel) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ChannelAPIKeyLabel_index,
+		func(ctx context.Context) (any, error) {
+			return obj.Index, nil
+		},
+		nil,
+		ec.marshalOInt2ᚖint,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_ChannelAPIKeyLabel_index(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ChannelAPIKeyLabel",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ChannelAPIKeyLabel_deleted(ctx context.Context, field graphql.CollectedField, obj *ChannelAPIKeyLabel) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ChannelAPIKeyLabel_deleted,
+		func(ctx context.Context) (any, error) {
+			return obj.Deleted, nil
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ChannelAPIKeyLabel_deleted(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ChannelAPIKeyLabel",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
 		},
 	}
 	return fc, nil
@@ -25671,6 +25918,41 @@ func (ec *executionContext) fieldContext_ChannelCredentials_apiKeys(_ context.Co
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ChannelCredentials_apiKeyNames(ctx context.Context, field graphql.CollectedField, obj *objects.ChannelCredentials) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ChannelCredentials_apiKeyNames,
+		func(ctx context.Context) (any, error) {
+			return obj.APIKeyNames, nil
+		},
+		nil,
+		ec.marshalOAPIKeyName2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyNameᚄ,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_ChannelCredentials_apiKeyNames(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ChannelCredentials",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "key":
+				return ec.fieldContext_APIKeyName_key(ctx, field)
+			case "name":
+				return ec.fieldContext_APIKeyName_name(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type APIKeyName", field.Name)
 		},
 	}
 	return fc, nil
@@ -38676,7 +38958,7 @@ func (ec *executionContext) _Mutation_updateChannel(ctx context.Context, field g
 		ec.fieldContext_Mutation_updateChannel,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.resolvers.Mutation().UpdateChannel(ctx, fc.Args["id"].(objects.GUID), fc.Args["input"].(ent.UpdateChannelInput))
+			return ec.resolvers.Mutation().UpdateChannel(ctx, fc.Args["id"].(objects.GUID), fc.Args["input"].(ent.UpdateChannelInput), fc.Args["apiKeyStateChanges"].(*biz.ChannelAPIKeyStateChanges), fc.Args["expectedUpdatedAt"].(*time.Time))
 		},
 		nil,
 		ec.marshalNChannel2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋentᚐChannel,
@@ -39976,6 +40258,47 @@ func (ec *executionContext) fieldContext_Mutation_enableSelectedChannelAPIKeys(c
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_enableSelectedChannelAPIKeys_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_disableSelectedChannelAPIKeys(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_disableSelectedChannelAPIKeys,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.resolvers.Mutation().DisableSelectedChannelAPIKeys(ctx, fc.Args["channelID"].(objects.GUID), fc.Args["keys"].([]string))
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_disableSelectedChannelAPIKeys(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_disableSelectedChannelAPIKeys_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -61757,6 +62080,43 @@ func (ec *executionContext) fieldContext_RequestExecution_dataStorage(_ context.
 	return fc, nil
 }
 
+func (ec *executionContext) _RequestExecution_channelAPIKeyLabel(ctx context.Context, field graphql.CollectedField, obj *ent.RequestExecution) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_RequestExecution_channelAPIKeyLabel,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.RequestExecution().ChannelAPIKeyLabel(ctx, obj)
+		},
+		nil,
+		ec.marshalOChannelAPIKeyLabel2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐChannelAPIKeyLabel,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_RequestExecution_channelAPIKeyLabel(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "RequestExecution",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "name":
+				return ec.fieldContext_ChannelAPIKeyLabel_name(ctx, field)
+			case "index":
+				return ec.fieldContext_ChannelAPIKeyLabel_index(ctx, field)
+			case "deleted":
+				return ec.fieldContext_ChannelAPIKeyLabel_deleted(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type ChannelAPIKeyLabel", field.Name)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _RequestExecutionConnection_edges(ctx context.Context, field graphql.CollectedField, obj *ent.RequestExecutionConnection) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -61946,6 +62306,8 @@ func (ec *executionContext) fieldContext_RequestExecutionEdge_node(_ context.Con
 				return ec.fieldContext_RequestExecution_channel(ctx, field)
 			case "dataStorage":
 				return ec.fieldContext_RequestExecution_dataStorage(ctx, field)
+			case "channelAPIKeyLabel":
+				return ec.fieldContext_RequestExecution_channelAPIKeyLabel(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type RequestExecution", field.Name)
 		},
@@ -75207,6 +75569,40 @@ func (ec *executionContext) unmarshalInputAPIKeyAutoDisableRuleInput(ctx context
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputAPIKeyNameInput(ctx context.Context, obj any) (objects.APIKeyName, error) {
+	var it objects.APIKeyName
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"key", "name"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "key":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("key"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Key = data
+		case "name":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("name"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Name = data
+		}
+	}
+
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputAPIKeyOrder(ctx context.Context, obj any) (ent.APIKeyOrder, error) {
 	var it ent.APIKeyOrder
 	asMap := map[string]any{}
@@ -77427,6 +77823,40 @@ func (ec *executionContext) unmarshalInputCatalogRouteChoice(ctx context.Context
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputChannelAPIKeyStateChangesInput(ctx context.Context, obj any) (biz.ChannelAPIKeyStateChanges, error) {
+	var it biz.ChannelAPIKeyStateChanges
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"enableKeys", "disableKeys"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "enableKeys":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("enableKeys"))
+			data, err := ec.unmarshalOString2ᚕstringᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.EnableKeys = data
+		case "disableKeys":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("disableKeys"))
+			data, err := ec.unmarshalOString2ᚕstringᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.DisableKeys = data
+		}
+	}
+
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputChannelCredentialsInput(ctx context.Context, obj any) (objects.ChannelCredentials, error) {
 	var it objects.ChannelCredentials
 	asMap := map[string]any{}
@@ -77434,7 +77864,7 @@ func (ec *executionContext) unmarshalInputChannelCredentialsInput(ctx context.Co
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"apiKey", "apiKeys", "vertexApiKeys", "vertexServiceAccounts", "gcp", "oauth", "managementApiKey"}
+	fieldsInOrder := [...]string{"apiKey", "apiKeys", "apiKeyNames", "vertexApiKeys", "vertexServiceAccounts", "gcp", "oauth", "managementApiKey"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -77455,6 +77885,13 @@ func (ec *executionContext) unmarshalInputChannelCredentialsInput(ctx context.Co
 				return it, err
 			}
 			it.APIKeys = data
+		case "apiKeyNames":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("apiKeyNames"))
+			data, err := ec.unmarshalOAPIKeyNameInput2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyNameᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.APIKeyNames = data
 		case "vertexApiKeys":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("vertexApiKeys"))
 			data, err := ec.unmarshalOVertexAPIKeyInput2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐVertexAPIKeyᚄ(ctx, v)
@@ -103140,6 +103577,50 @@ func (ec *executionContext) _APIKeyEdge(ctx context.Context, sel ast.SelectionSe
 	return out
 }
 
+var aPIKeyNameImplementors = []string{"APIKeyName"}
+
+func (ec *executionContext) _APIKeyName(ctx context.Context, sel ast.SelectionSet, obj *objects.APIKeyName) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, aPIKeyNameImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("APIKeyName")
+		case "key":
+			out.Values[i] = ec._APIKeyName_key(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "name":
+			out.Values[i] = ec._APIKeyName_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var aPIKeyProfileImplementors = []string{"APIKeyProfile"}
 
 func (ec *executionContext) _APIKeyProfile(ctx context.Context, sel ast.SelectionSet, obj *objects.APIKeyProfile) graphql.Marshaler {
@@ -105845,6 +106326,49 @@ func (ec *executionContext) _Channel(ctx context.Context, sel ast.SelectionSet, 
 	return out
 }
 
+var channelAPIKeyLabelImplementors = []string{"ChannelAPIKeyLabel"}
+
+func (ec *executionContext) _ChannelAPIKeyLabel(ctx context.Context, sel ast.SelectionSet, obj *ChannelAPIKeyLabel) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, channelAPIKeyLabelImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("ChannelAPIKeyLabel")
+		case "name":
+			out.Values[i] = ec._ChannelAPIKeyLabel_name(ctx, field, obj)
+		case "index":
+			out.Values[i] = ec._ChannelAPIKeyLabel_index(ctx, field, obj)
+		case "deleted":
+			out.Values[i] = ec._ChannelAPIKeyLabel_deleted(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var channelConnectionImplementors = []string{"ChannelConnection"}
 
 func (ec *executionContext) _ChannelConnection(ctx context.Context, sel ast.SelectionSet, obj *ent.ChannelConnection) graphql.Marshaler {
@@ -105911,6 +106435,8 @@ func (ec *executionContext) _ChannelCredentials(ctx context.Context, sel ast.Sel
 			out.Values[i] = ec._ChannelCredentials_apiKey(ctx, field, obj)
 		case "apiKeys":
 			out.Values[i] = ec._ChannelCredentials_apiKeys(ctx, field, obj)
+		case "apiKeyNames":
+			out.Values[i] = ec._ChannelCredentials_apiKeyNames(ctx, field, obj)
 		case "vertexApiKeys":
 			out.Values[i] = ec._ChannelCredentials_vertexApiKeys(ctx, field, obj)
 		case "vertexServiceAccounts":
@@ -111745,6 +112271,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "enableSelectedChannelAPIKeys":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_enableSelectedChannelAPIKeys(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "disableSelectedChannelAPIKeys":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_disableSelectedChannelAPIKeys(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -119872,6 +120405,39 @@ func (ec *executionContext) _RequestExecution(ctx context.Context, sel ast.Selec
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "channelAPIKeyLabel":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._RequestExecution_channelAPIKeyLabel(ctx, field, obj)
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -126092,6 +126658,15 @@ func (ec *executionContext) marshalNAPIKeyConnection2ᚖgithubᚗcomᚋloopljᚋ
 		return graphql.Null
 	}
 	return ec._APIKeyConnection(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNAPIKeyName2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyName(ctx context.Context, sel ast.SelectionSet, v objects.APIKeyName) graphql.Marshaler {
+	return ec._APIKeyName(ctx, sel, &v)
+}
+
+func (ec *executionContext) unmarshalNAPIKeyNameInput2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyName(ctx context.Context, v any) (objects.APIKeyName, error) {
+	res, err := ec.unmarshalInputAPIKeyNameInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
 }
 
 func (ec *executionContext) unmarshalNAPIKeyOrderField2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋentᚐAPIKeyOrderField(ctx context.Context, v any) (*ent.APIKeyOrderField, error) {
@@ -134153,6 +134728,71 @@ func (ec *executionContext) marshalOAPIKeyEdge2ᚖgithubᚗcomᚋloopljᚋaxonhu
 	return ec._APIKeyEdge(ctx, sel, v)
 }
 
+func (ec *executionContext) marshalOAPIKeyName2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyNameᚄ(ctx context.Context, sel ast.SelectionSet, v []objects.APIKeyName) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNAPIKeyName2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyName(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) unmarshalOAPIKeyNameInput2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyNameᚄ(ctx context.Context, v any) ([]objects.APIKeyName, error) {
+	if v == nil {
+		return nil, nil
+	}
+	var vSlice []any
+	vSlice = graphql.CoerceList(v)
+	var err error
+	res := make([]objects.APIKeyName, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNAPIKeyNameInput2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐAPIKeyName(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
 func (ec *executionContext) unmarshalOAPIKeyOrder2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋentᚐAPIKeyOrder(ctx context.Context, v any) (*ent.APIKeyOrder, error) {
 	if v == nil {
 		return nil, nil
@@ -134690,6 +135330,21 @@ func (ec *executionContext) marshalOChannel2ᚖgithubᚗcomᚋloopljᚋaxonhub�
 		return graphql.Null
 	}
 	return ec._Channel(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalOChannelAPIKeyLabel2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐChannelAPIKeyLabel(ctx context.Context, sel ast.SelectionSet, v *ChannelAPIKeyLabel) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._ChannelAPIKeyLabel(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalOChannelAPIKeyStateChangesInput2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋbizᚐChannelAPIKeyStateChanges(ctx context.Context, v any) (*biz.ChannelAPIKeyStateChanges, error) {
+	if v == nil {
+		return nil, nil
+	}
+	res, err := ec.unmarshalInputChannelAPIKeyStateChangesInput(ctx, v)
+	return &res, graphql.ErrorOnPath(ctx, err)
 }
 
 func (ec *executionContext) marshalOChannelCredentials2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐChannelCredentials(ctx context.Context, sel ast.SelectionSet, v *objects.ChannelCredentials) graphql.Marshaler {

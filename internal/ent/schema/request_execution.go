@@ -42,7 +42,9 @@ func (RequestExecution) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int("project_id").Immutable().Default(1),
 		field.Int("request_id").Immutable(),
-		field.Int("channel_id").Immutable().Optional(), // Optional for deleted channel, this field is not null.
+		field.Int("channel_id").Immutable().Optional().Annotations( // Optional for deleted channel, this field is not null.
+			entgql.CollectedFor("channelAPIKeyLabel"),
+		),
 		// 1-based position of the API key actually used, matching the order of the
 		// channel's configured credential list. Recorded at request time instead of
 		// resolved from the credentials later, so the number stays correct after
@@ -97,6 +99,17 @@ func (RequestExecution) Fields() []ent.Field {
 			Annotations(
 				entgql.Directives(forceResolver()),
 				entgql.Skip(entgql.SkipWhereInput),
+			),
+		field.String("channel_api_key_fingerprint").
+			Optional().
+			Nillable().
+			Immutable().
+			Sensitive().
+			MaxLen(64).
+			Comment("SHA-256 hex digest of the channel credential used for this execution").
+			Annotations(
+				entgql.Skip(),
+				entgql.CollectedFor("channelAPIKeyLabel"),
 			),
 		// The original request to the provider.
 		// e.g: the user request via OpenAI request format, but the actual request to the provider with Claude format, the request_body is the Claude request format.

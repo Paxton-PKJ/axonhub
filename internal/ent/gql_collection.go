@@ -4140,6 +4140,15 @@ func (_q *RequestExecutionQuery) collectField(ctx context.Context, oneNode bool,
 				selectedFields = append(selectedFields, requestexecution.FieldPassThroughApplied)
 				fieldSeen[requestexecution.FieldPassThroughApplied] = struct{}{}
 			}
+		case "channelAPIKeyLabel":
+			if _, ok := fieldSeen[requestexecution.FieldChannelID]; !ok {
+				selectedFields = append(selectedFields, requestexecution.FieldChannelID)
+				fieldSeen[requestexecution.FieldChannelID] = struct{}{}
+			}
+			if _, ok := fieldSeen[requestexecution.FieldChannelAPIKeyFingerprint]; !ok {
+				selectedFields = append(selectedFields, requestexecution.FieldChannelAPIKeyFingerprint)
+				fieldSeen[requestexecution.FieldChannelAPIKeyFingerprint] = struct{}{}
+			}
 		case "id":
 		case "__typename":
 		default:

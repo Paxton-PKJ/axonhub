@@ -3,37 +3,56 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   IconAlertTriangle,
+  IconBan,
+  IconCheck,
+  IconCircleCheck,
   IconCopy,
   IconKey,
   IconLoader2,
   IconPencil,
   IconPlayerPlay,
-  IconRefresh,
   IconTrash,
   IconUpload,
+  IconX,
 } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { copyTextToClipboard } from '@/lib/clipboard';
+import { isErrorCode } from '@/lib/error-parser';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChannels } from '../context/channels-context';
 import {
+  fetchLatestChannel,
   useChannelDisabledAPIKeys,
   useDeleteDisabledChannelAPIKeys,
   useDisableChannelAPIKey,
+  useDisableSelectedChannelAPIKeys,
   useEnableChannelAPIKey,
+  useEnableSelectedChannelAPIKeys,
   useTestChannelAPIKey,
   useUpdateChannel,
 } from '../data/channels';
-import { ChannelCredentials, TestAPIKeyResult } from '../data/schema';
+import { APIKeyName, Channel, ChannelCredentials, TestAPIKeyResult } from '../data/schema';
 import { getVertexServiceAccountIdentity, maskVertexCredentialRef, toVertexServiceAccountInputs } from '../data/vertex-service-account';
+import {
+  MAX_API_KEY_NAME_LENGTH,
+  EMPTY_DISABLED_API_KEYS,
+  channelSupportsAPIKeyNames,
+  filterActiveDisabledAPIKeys,
+  findDuplicateAPIKeyNames,
+  getAPIKeyNameMap,
+  normalizeAPIKeyNamesForKeys,
+  setAPIKeyName,
+  validateAPIKeyName,
+} from '../utils/api-key-names';
 
 interface ChannelsAPIKeyManagementDialogProps {
   open: boolean;
@@ -56,22 +75,32 @@ function maskAPIKey(key: string) {
  */
 export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsAPIKeyManagementDialogProps) {
   const { t } = useTranslation();
-  const { currentRow, setOpen } = useChannels();
+  const { currentRow, setCurrentRow, setOpen } = useChannels();
   const [bulkImportText, setBulkImportText] = useState('');
+  const [baselineUpdatedAt, setBaselineUpdatedAt] = useState<string | undefined>(undefined);
+  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [testingKey, setTestingKey] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestAPIKeyResult>>({});
+  const [pendingTestDisabled, setPendingTestDisabled] = useState<Record<string, number>>({});
   const [confirmDisableKey, setConfirmDisableKey] = useState<string | null>(null);
   const [confirmKeepDisabledKey, setConfirmKeepDisabledKey] = useState<string | null>(null);
   const [confirmEnableKey, setConfirmEnableKey] = useState<string | null>(null);
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
   const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
-  // 本弹窗独立的 key 列表：基于 currentRow 快照初始化，导入/删除后本地更新，
+  const [confirmEnableSelected, setConfirmEnableSelected] = useState(false);
+  const [confirmDisableSelected, setConfirmDisableSelected] = useState(false);
+  // 本弹窗独立的 key 列表与名称列表：基于 currentRow 快照初始化，导入/删除/改名后本地更新，
   // 避免依赖不会随 query 刷新而更新的 currentRow 快照。
   const [localKeys, setLocalKeys] = useState<string[]>([]);
   // Vertex 密钥是项目绑定的三元组：列表里展示 apiKey，但每次提交都必须把绑定原样带回，
   // 否则后端整体替换 credentials 时会丢掉 projectID/region。
   const [vertexBindings, setVertexBindings] = useState<NonNullable<ChannelCredentials['vertexApiKeys']>>([]);
+  const [localNames, setLocalNames] = useState<APIKeyName[]>([]);
+  const [editingNameKey, setEditingNameKey] = useState<string | null>(null);
+  const [editingNameValue, setEditingNameValue] = useState('');
+  const [editingNameError, setEditingNameError] = useState<string | null>(null);
+  const skipNameBlurRef = useRef(false);
   // Service account rows keep their server-issued credentialRef: it is the identity the
   // disable/enable/test mutations and the disabled-key list use, and it never leaks the
   // JSON body. Removal rewrites the list without the removed row.
@@ -82,43 +111,78 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
   const testSingleKey = useTestChannelAPIKey();
   const disableAPIKey = useDisableChannelAPIKey();
   const enableAPIKey = useEnableChannelAPIKey();
+  const enableSelectedAPIKeys = useEnableSelectedChannelAPIKeys();
+  const disableSelectedAPIKeys = useDisableSelectedChannelAPIKeys();
   const updateChannel = useUpdateChannel();
   const deleteDisabledAPIKeys = useDeleteDisabledChannelAPIKeys();
 
   const validKeys = useMemo(() => localKeys.filter((key) => key.trim().length > 0), [localKeys]);
+  const nameMap = useMemo(() => getAPIKeyNameMap(localNames), [localNames]);
+  const duplicateNames = useMemo(() => findDuplicateAPIKeyNames(localNames, validKeys), [localNames, validKeys]);
   // 服务端实时禁用的 key 集合（所有 disable/enable mutation 都会 invalidate 此 query）
-  const { data: disabledKeys = [], isLoading: disabledLoading } = useChannelDisabledAPIKeys(currentRow?.id || '', {
+  const {
+    data: disabledKeys = EMPTY_DISABLED_API_KEYS,
+    isLoading: disabledLoading,
+    dataUpdatedAt: disabledKeysUpdatedAt = 0,
+    refetch: refetchDisabledKeys,
+  } = useChannelDisabledAPIKeys(currentRow?.id || '', {
     enabled: open && !!currentRow?.id,
   });
-  const disabledKeySet = useMemo(() => new Set(disabledKeys.map((item) => item.key)), [disabledKeys]);
 
-  // 本弹窗内测试后得到的"已禁用"结果（测试接口会动态反馈真实状态）
+  const activeDisabledKeys = useMemo(
+    () => filterActiveDisabledAPIKeys(disabledKeys),
+    [disabledKeys]
+  );
+  const disabledKeySet = useMemo(() => new Set(activeDisabledKeys.map((item) => item.key)), [activeDisabledKeys]);
   const effectivelyDisabledSet = useMemo(() => {
     const set = new Set(disabledKeySet);
-    Object.entries(testResults).forEach(([key, result]) => {
-      if (result.disabled) {
+    for (const [key, recordedAt] of Object.entries(pendingTestDisabled)) {
+      if (recordedAt === disabledKeysUpdatedAt) {
         set.add(key);
       }
-    });
+    }
     return set;
-  }, [disabledKeySet, testResults]);
+  }, [disabledKeySet, pendingTestDisabled, disabledKeysUpdatedAt]);
 
   // 当前可用的 key 数量（未被禁用的），与编辑弹窗的 mustKeepOneEnabled 保护一致
   const enabledKeysCount = useMemo(
     () => validKeys.filter((key) => !effectivelyDisabledSet.has(key)).length,
     [validKeys, effectivelyDisabledSet]
   );
+  const selectedEnabledKeys = useMemo(
+    () => validKeys.filter((key) => selectedKeys.has(key) && !effectivelyDisabledSet.has(key)),
+    [validKeys, selectedKeys, effectivelyDisabledSet]
+  );
+  const selectedDisabledKeys = useMemo(
+    () => validKeys.filter((key) => selectedKeys.has(key) && effectivelyDisabledSet.has(key)),
+    [validKeys, selectedKeys, effectivelyDisabledSet]
+  );
   const isVertexChannel = currentRow?.type === 'gemini_vertex';
+  const canEditKeyNames = channelSupportsAPIKeyNames(currentRow?.type, currentRow?.credentials);
   const enabledServiceAccountCount = serviceAccounts.filter(
     (account) => !!account.credentialRef && !effectivelyDisabledSet.has(account.credentialRef)
   ).length;
   // Disabling is blocked when it would leave the channel with no enabled credential of
   // either type, which is the same rule the backend applies to the combined refs.
   const enabledCredentialCount = enabledKeysCount + enabledServiceAccountCount;
+  const canBatchEnable = selectedDisabledKeys.length > 0;
+  const batchDisableBlockedByLastEnabled =
+    selectedEnabledKeys.length > 0 && enabledCredentialCount - selectedEnabledKeys.length < 1;
+  const canBatchDisable = selectedEnabledKeys.length > 0 && !batchDisableBlockedByLastEnabled;
+  const batchDeleteBlockedByLastKey =
+    selectedKeys.size > 0 && validKeys.length + serviceAccounts.length - selectedKeys.size < 1;
+  const batchDeleteBlockedByLastEnabled =
+    selectedEnabledKeys.length > 0 && enabledCredentialCount - selectedEnabledKeys.length < 1;
   const isLastKey = validKeys.length + serviceAccounts.length <= 1;
 
   const isPending =
-    testingKey !== null || disableAPIKey.isPending || enableAPIKey.isPending || updateChannel.isPending || deleteDisabledAPIKeys.isPending;
+    testingKey !== null ||
+    disableAPIKey.isPending ||
+    enableAPIKey.isPending ||
+    enableSelectedAPIKeys.isPending ||
+    disableSelectedAPIKeys.isPending ||
+    updateChannel.isPending ||
+    deleteDisabledAPIKeys.isPending;
 
   useEffect(() => {
     if (open) {
@@ -128,18 +192,28 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
       // 只读绑定 key 导致平铺 key 从列表消失。
       const flatKeys = currentRow?.credentials?.apiKeys ?? [];
       const boundKeys = (currentRow?.credentials?.vertexApiKeys ?? []).map((binding) => binding.apiKey);
-      setLocalKeys([...flatKeys, ...boundKeys]);
+      const initialKeys = [...flatKeys, ...boundKeys];
+      setLocalKeys(initialKeys);
       setVertexBindings(currentRow?.credentials?.vertexApiKeys ?? []);
+      setLocalNames(currentRow?.credentials?.apiKeyNames ?? []);
+      setBaselineUpdatedAt(currentRow?.updatedAt);
+      setConflictNotice(null);
+      setEditingNameKey(null);
+      setEditingNameValue('');
+      setEditingNameError(null);
       setServiceAccounts(currentRow?.credentials?.vertexServiceAccounts ?? []);
       setConfirmDeleteServiceAccount(null);
       setSelectedKeys(new Set());
       setTestingKey(null);
       setTestResults({});
+      setPendingTestDisabled({});
       setConfirmDisableKey(null);
       setConfirmKeepDisabledKey(null);
       setConfirmEnableKey(null);
       setConfirmDeleteKey(null);
       setConfirmDeleteSelected(false);
+      setConfirmEnableSelected(false);
+      setConfirmDisableSelected(false);
       abortRef.current = false;
     }
     // 仅在弹窗打开或切换渠道时初始化一次 localKeys；
@@ -153,9 +227,12 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
 
   // Vertex 密钥只能作为三元组提交：平铺进 apiKeys 会变成没有项目绑定的密钥，
   // 所以列表里的 Vertex 密钥要从 apiKeys 里排除，绑定则按存活的 key 过滤后原样带回。
-  const buildCredentials = (keys: string[], accounts = serviceAccounts) => {
+  const buildCredentials = (keys: string[], accounts = serviceAccounts, names = localNames) => {
     if (!isVertexChannel) {
-      return { apiKeys: keys };
+      return {
+        apiKeys: keys,
+        ...(canEditKeyNames ? { apiKeyNames: normalizeAPIKeyNamesForKeys(names, keys) } : {}),
+      };
     }
     const boundKeys = new Set(vertexBindings.map((binding) => binding.apiKey));
     const keptKeys = new Set(keys);
@@ -168,19 +245,172 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
     };
   };
 
+  const applyChannelSnapshot = (snapshot: Channel) => {
+    if (!snapshot.credentials) {
+      if (snapshot.updatedAt) {
+        setBaselineUpdatedAt(snapshot.updatedAt);
+      }
+      return validKeys;
+    }
+    const flatKeys = snapshot.credentials.apiKeys ?? [];
+    const boundKeys = (snapshot.credentials.vertexApiKeys ?? []).map((binding) => binding.apiKey);
+    const nextKeys = [...flatKeys, ...boundKeys];
+    setLocalKeys(nextKeys);
+    setVertexBindings(snapshot.credentials.vertexApiKeys ?? []);
+    setLocalNames(snapshot.credentials.apiKeyNames ?? []);
+    setServiceAccounts(snapshot.credentials.vertexServiceAccounts ?? []);
+    setBaselineUpdatedAt(snapshot.updatedAt);
+    setSelectedKeys((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+      const allowed = new Set(nextKeys);
+      const next = new Set<string>();
+      prev.forEach((k) => {
+        if (allowed.has(k)) {
+          next.add(k);
+        }
+      });
+      return next;
+    });
+    setCurrentRow?.(snapshot);
+    return nextKeys;
+  };
+
+  const commitMutationResult = (
+    updated: Channel | undefined,
+    committed: {
+      keys?: string[];
+      names?: APIKeyName[];
+      bindings?: NonNullable<ChannelCredentials['vertexApiKeys']>;
+      accounts?: NonNullable<ChannelCredentials['vertexServiceAccounts']>;
+    }
+  ) => {
+    setConflictNotice(null);
+    if (updated?.credentials) {
+      applyChannelSnapshot(updated);
+      return;
+    }
+
+    const nextKeys = committed.keys ?? localKeys;
+    const nextNames = committed.names ?? localNames;
+    const nextBindings = committed.bindings ?? vertexBindings;
+    const nextAccounts = committed.accounts ?? serviceAccounts;
+
+    if (committed.keys !== undefined) {
+      setLocalKeys(committed.keys);
+      setSelectedKeys((prev) => {
+        if (prev.size === 0) {
+          return prev;
+        }
+        const allowed = new Set(committed.keys);
+        const next = new Set<string>();
+        prev.forEach((k) => {
+          if (allowed.has(k)) {
+            next.add(k);
+          }
+        });
+        return next;
+      });
+    }
+    if (committed.names !== undefined) {
+      setLocalNames(committed.names);
+    }
+    if (committed.bindings !== undefined) {
+      setVertexBindings(committed.bindings);
+    }
+    if (committed.accounts !== undefined) {
+      setServiceAccounts(committed.accounts);
+    }
+    if (updated?.updatedAt) {
+      setBaselineUpdatedAt(updated.updatedAt);
+    }
+    setCurrentRow?.((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      const nextCredentials = isVertexChannel
+        ? {
+            ...(prev.credentials ?? {}),
+            apiKeys: nextKeys.filter((key) => !nextBindings.some((binding) => binding.apiKey === key)),
+            vertexApiKeys: nextBindings,
+            vertexServiceAccounts: nextAccounts,
+          }
+        : {
+            ...(prev.credentials ?? {}),
+            apiKeys: nextKeys,
+            ...(canEditKeyNames ? { apiKeyNames: nextNames } : {}),
+          };
+      return {
+        ...prev,
+        ...(updated ?? {}),
+        credentials: nextCredentials,
+      };
+    });
+  };
+
+  const syncBaselineAfterStateMutation = async (): Promise<boolean> => {
+    if (typeof fetchLatestChannel !== 'function' || !baselineUpdatedAt) {
+      return false;
+    }
+    try {
+      const latest = await fetchLatestChannel(currentRow.id);
+      applyChannelSnapshot(latest);
+      return Boolean(latest?.credentials);
+    } catch {
+      return false;
+    }
+  };
+
+  const refreshAfterConflict = async (options?: { editingKey?: string | null }) => {
+    void refetchDisabledKeys?.();
+    let refreshedKeys = validKeys;
+    if (typeof fetchLatestChannel === 'function') {
+      try {
+        const latest = await fetchLatestChannel(currentRow.id);
+        refreshedKeys = applyChannelSnapshot(latest);
+      } catch {
+        // Keep current keys when reload fails.
+      }
+    }
+
+    const targetKey = options?.editingKey;
+    if (targetKey) {
+      if (refreshedKeys.includes(targetKey)) {
+        const msg = t('channels.dialogs.keyManagement.concurrentUpdateConflict');
+        setEditingNameError(msg);
+        setConflictNotice(msg);
+      } else {
+        cancelEditingKeyName();
+        setConflictNotice(t('channels.dialogs.keyManagement.concurrentUpdateConflictKeyRemoved'));
+      }
+      return;
+    }
+
+    setConflictNotice(t('channels.dialogs.keyManagement.concurrentUpdateConflict'));
+  };
+
   const handleClose = () => {
     abortRef.current = true;
     setOpen(null);
     onOpenChange(false);
     setBulkImportText('');
+    setBaselineUpdatedAt(undefined);
+    setConflictNotice(null);
+    setEditingNameKey(null);
+    setEditingNameValue('');
+    setEditingNameError(null);
     setSelectedKeys(new Set());
     setTestingKey(null);
     setTestResults({});
+    setPendingTestDisabled({});
     setConfirmDisableKey(null);
     setConfirmKeepDisabledKey(null);
     setConfirmEnableKey(null);
     setConfirmDeleteKey(null);
     setConfirmDeleteSelected(false);
+    setConfirmEnableSelected(false);
+    setConfirmDisableSelected(false);
   };
 
   /** 批量导入：多行文本，一行一个 key，去重、去空白，追加到渠道密钥列表 */
@@ -205,69 +435,108 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
       return;
     }
 
+    const nextKeys = [...validKeys, ...deduped];
+    const nextNames = normalizeAPIKeyNamesForKeys(localNames, nextKeys);
     try {
-      await updateChannel.mutateAsync({
+      const updated = await updateChannel.mutateAsync({
         id: currentRow.id,
         input: {
-          credentials: buildCredentials([...validKeys, ...deduped]),
+          credentials: buildCredentials(nextKeys, serviceAccounts, nextNames),
         },
+        ...(baselineUpdatedAt ? { expectedUpdatedAt: baselineUpdatedAt } : {}),
       });
-      // 本地同步更新，避免依赖不会刷新的 currentRow 快照
-      setLocalKeys((prev) => [...prev, ...deduped]);
+      commitMutationResult(updated, { keys: nextKeys, names: nextNames });
       setBulkImportText('');
-    } catch {
-      // handled by hook
+    } catch (error) {
+      if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
+        await refreshAfterConflict();
+      }
     }
   };
 
-  /** 删除 key（活动 key 从 credentials 移除；已禁用 key 走 deleteDisabledAPIKeys） */
+  /** 删除 key（纯禁用 key 走 deleteDisabledAPIKeys；包含活动 key 时通过单次 updateChannel 原子提交并由服务端清理关联禁用记录） */
   const deleteKeys = async (keysToDelete: string[]) => {
     if (keysToDelete.length === 0) {
       return;
     }
 
+    const deleteSet = new Set(keysToDelete);
+    const remainingKeys = validKeys.filter((key) => !deleteSet.has(key));
+    if (remainingKeys.length + serviceAccounts.length < 1) {
+      toast.error(t('channels.dialogs.fields.apiKey.mustKeepOne'));
+      return;
+    }
+
+    const deletedEnabledCount = keysToDelete.filter((key) => !effectivelyDisabledSet.has(key)).length;
+    if (deletedEnabledCount > 0 && enabledCredentialCount - deletedEnabledCount < 1) {
+      toast.error(t('channels.dialogs.fields.apiKey.mustKeepOneEnabled'));
+      return;
+    }
+
     const disabled = keysToDelete.filter((key) => effectivelyDisabledSet.has(key));
     const active = keysToDelete.filter((key) => !effectivelyDisabledSet.has(key));
+    const nextNames = normalizeAPIKeyNamesForKeys(localNames, remainingKeys);
+    const nextBindings = vertexBindings.filter((binding) => !deleteSet.has(binding.apiKey));
 
-    if (disabled.length > 0) {
+    if (active.length === 0) {
       await deleteDisabledAPIKeys.mutateAsync({ channelID: currentRow.id, keys: disabled });
+      const synced = await syncBaselineAfterStateMutation();
+      if (!synced) {
+        setLocalKeys(remainingKeys);
+        setLocalNames(nextNames);
+        setVertexBindings(nextBindings);
+      }
+      return;
     }
-    // 注意：remainingKeys 必须同时过滤 active 与 disabled，
-    // 避免把上面 deleteDisabledAPIKeys 已从 credentials 移除的 disabled key 写回去。
-    const removed = new Set([...active, ...disabled]);
-    const remainingKeys = validKeys.filter((key) => !removed.has(key));
-    if (active.length > 0) {
-      await updateChannel.mutateAsync({
-        id: currentRow.id,
-        input: { credentials: buildCredentials(remainingKeys) },
-      });
-    }
-    // 本地同步更新（disabled 删除走 deleteDisabledAPIKeys 不触发 updateChannel，
-    // 但同样要从弹窗列表里移除）
-    setLocalKeys(remainingKeys);
-    setVertexBindings((prev) => prev.filter((binding) => !removed.has(binding.apiKey)));
+
+    const updated = await updateChannel.mutateAsync({
+      id: currentRow.id,
+      input: { credentials: buildCredentials(remainingKeys, serviceAccounts, nextNames) },
+      ...(baselineUpdatedAt ? { expectedUpdatedAt: baselineUpdatedAt } : {}),
+    });
+    commitMutationResult(updated, { keys: remainingKeys, names: nextNames, bindings: nextBindings });
   };
 
   const handleDeleteSingle = async (key: string) => {
     try {
       await deleteKeys([key]);
       setConfirmDeleteKey(null);
-    } catch {
-      // handled by hooks
+    } catch (error) {
+      if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
+        setConfirmDeleteKey(null);
+        await refreshAfterConflict();
+      }
     }
   };
 
   const handleDeleteSelected = async () => {
-    if (selectedKeys.size === 0 || selectedKeys.size >= validKeys.length) {
+    if (selectedKeys.size === 0 || batchDeleteBlockedByLastKey || batchDeleteBlockedByLastEnabled) {
       return;
     }
     try {
       await deleteKeys(Array.from(selectedKeys));
       setConfirmDeleteSelected(false);
       setSelectedKeys(new Set());
-    } catch {
-      // handled by hooks
+    } catch (error) {
+      if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
+        setConfirmDeleteSelected(false);
+        await refreshAfterConflict();
+      }
     }
+  };
+
+  const updatePendingTestDisabled = (key: string, disabled: boolean) => {
+    setPendingTestDisabled((prev) => {
+      if (disabled) {
+        return { ...prev, [key]: disabledKeysUpdatedAt };
+      }
+      if (!(key in prev)) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   };
 
   const handleTestSingle = async (key: string) => {
@@ -283,6 +552,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
       });
       if (!abortRef.current) {
         setTestResults((prev) => ({ ...prev, [key]: result }));
+        updatePendingTestDisabled(key, result.disabled);
       }
     } catch {
       if (!abortRef.current) {
@@ -290,6 +560,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
           ...prev,
           [key]: { keyPrefix: maskAPIKey(key), success: false, latency: 0, error: t('channels.dialogs.testAPIKeys.requestFailed'), disabled: false },
         }));
+        updatePendingTestDisabled(key, false);
       }
     } finally {
       if (!abortRef.current) {
@@ -318,6 +589,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
         });
         if (!abortRef.current) {
           setTestResults((prev) => ({ ...prev, [key]: result }));
+          updatePendingTestDisabled(key, result.disabled);
         }
       } catch {
         if (!abortRef.current) {
@@ -325,6 +597,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
             ...prev,
             [key]: { keyPrefix: maskAPIKey(key), success: false, latency: 0, error: t('channels.dialogs.testAPIKeys.requestFailed'), disabled: false },
           }));
+          updatePendingTestDisabled(key, false);
         }
       }
       if (!abortRef.current) {
@@ -337,6 +610,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
   const handleToggleDisable = async (key: string) => {
     try {
       await disableAPIKey.mutateAsync({ channelID: currentRow.id, key });
+      void syncBaselineAfterStateMutation();
       setConfirmDisableKey(null);
       setConfirmKeepDisabledKey(null);
     } catch {
@@ -352,9 +626,103 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
         delete next[key];
         return next;
       });
+      updatePendingTestDisabled(key, false);
+      void syncBaselineAfterStateMutation();
       setConfirmEnableKey(null);
     } catch {
       // handled by hooks
+    }
+  };
+
+  const handleEnableSelected = async () => {
+    if (!canBatchEnable) {
+      return;
+    }
+    try {
+      await enableSelectedAPIKeys.mutateAsync({ channelID: currentRow.id, keys: selectedDisabledKeys });
+      setTestResults((prev) => {
+        const next = { ...prev };
+        selectedDisabledKeys.forEach((key) => {
+          delete next[key];
+        });
+        return next;
+      });
+      setPendingTestDisabled((prev) => {
+        const next = { ...prev };
+        selectedDisabledKeys.forEach((key) => {
+          delete next[key];
+        });
+        return next;
+      });
+      void syncBaselineAfterStateMutation();
+      setConfirmEnableSelected(false);
+      setSelectedKeys(new Set());
+    } catch {
+      // handled by hooks
+    }
+  };
+
+  const handleDisableSelected = async () => {
+    if (!canBatchDisable) {
+      return;
+    }
+    try {
+      await disableSelectedAPIKeys.mutateAsync({ channelID: currentRow.id, keys: selectedEnabledKeys });
+      void syncBaselineAfterStateMutation();
+      setConfirmDisableSelected(false);
+      setSelectedKeys(new Set());
+    } catch (error) {
+      if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
+        setConfirmDisableSelected(false);
+        await refreshAfterConflict();
+      }
+    }
+  };
+
+  const cancelEditingKeyName = () => {
+    setEditingNameKey(null);
+    setEditingNameValue('');
+    setEditingNameError(null);
+  };
+
+  const startEditingKeyName = (key: string) => {
+    skipNameBlurRef.current = false;
+    setEditingNameKey(key);
+    setEditingNameValue(nameMap.get(key) ?? '');
+    setEditingNameError(null);
+  };
+
+  const handleSaveKeyName = async (key: string) => {
+    if (!canEditKeyNames) {
+      cancelEditingKeyName();
+      return;
+    }
+    const check = validateAPIKeyName(editingNameValue);
+    if (check.tooLong) {
+      setEditingNameError(t('channels.dialogs.fields.apiKey.nameTooLong', { max: MAX_API_KEY_NAME_LENGTH }));
+      return;
+    }
+    const existingName = nameMap.get(key) ?? '';
+    if (check.normalized === existingName && !conflictNotice) {
+      cancelEditingKeyName();
+      return;
+    }
+
+    const nextNames = normalizeAPIKeyNamesForKeys(setAPIKeyName(localNames, key, check.normalized), validKeys);
+    try {
+      const updated = await updateChannel.mutateAsync({
+        id: currentRow.id,
+        input: {
+          credentials: buildCredentials(validKeys, serviceAccounts, nextNames),
+        },
+        ...(baselineUpdatedAt ? { expectedUpdatedAt: baselineUpdatedAt } : {}),
+      });
+      commitMutationResult(updated, { names: nextNames });
+      cancelEditingKeyName();
+    } catch (error) {
+      if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
+        await refreshAfterConflict({ editingKey: key });
+      }
     }
   };
 
@@ -362,14 +730,18 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
   const handleDeleteServiceAccount = async (credentialRef: string) => {
     const remaining = serviceAccounts.filter((account) => account.credentialRef !== credentialRef);
     try {
-      await updateChannel.mutateAsync({
+      const updated = await updateChannel.mutateAsync({
         id: currentRow.id,
         input: { credentials: buildCredentials(validKeys, remaining) },
+        ...(baselineUpdatedAt ? { expectedUpdatedAt: baselineUpdatedAt } : {}),
       });
-      setServiceAccounts(remaining);
+      commitMutationResult(updated, { accounts: remaining });
       setConfirmDeleteServiceAccount(null);
-    } catch {
-      // handled by hook
+    } catch (error) {
+      if (isErrorCode?.(error, 'CHANNEL_UPDATED_CONCURRENTLY')) {
+        setConfirmDeleteServiceAccount(null);
+        await refreshAfterConflict();
+      }
     }
   };
 
@@ -399,6 +771,12 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
         </DialogHeader>
 
         <div className='min-h-0 flex-1 space-y-4 overflow-y-auto'>
+          {conflictNotice && (
+            <div className='border-destructive/50 bg-destructive/10 text-destructive flex items-start gap-2 rounded-md border px-3 py-2 text-xs'>
+              <IconAlertTriangle className='mt-0.5 h-4 w-4 shrink-0' />
+              <span>{conflictNotice}</span>
+            </div>
+          )}
           {/* 批量导入区 */}
           <div className='rounded-md border bg-muted/40 p-3'>
             <div className='flex flex-wrap items-center justify-between gap-2'>
@@ -439,39 +817,121 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                     : t('channels.dialogs.keyManagement.totalCount', { count: validKeys.length })}
                 </span>
               </div>
-              <div className='flex items-center gap-1.5'>
+              <div className='flex flex-wrap items-center gap-1.5'>
                 <Button size='sm' variant='outline' onClick={handleTestSelected} disabled={isPending || selectedKeys.size === 0}>
                   <IconPlayerPlay className='mr-1 h-3.5 w-3.5' />
                   {t('channels.dialogs.keyManagement.testSelected', { count: selectedKeys.size })}
                 </Button>
-                <Popover open={confirmDeleteSelected} onOpenChange={setConfirmDeleteSelected}>
+                <Popover open={confirmEnableSelected} onOpenChange={setConfirmEnableSelected}>
                   <PopoverTrigger asChild>
-                    <Button
-                      size='sm'
-                      variant='outline'
-                      className='text-destructive'
-                      disabled={isPending || selectedKeys.size === 0 || selectedKeys.size >= validKeys.length}
-                    >
-                      <IconTrash className='mr-1 h-3.5 w-3.5' />
-                      {t('channels.dialogs.keyManagement.deleteSelected', { count: selectedKeys.size })}
+                    <Button size='sm' variant='outline' disabled={isPending || !canBatchEnable}>
+                      <IconCircleCheck className='mr-1 h-3.5 w-3.5' />
+                      {t('channels.dialogs.keyManagement.enableSelected', { count: selectedDisabledKeys.length })}
                     </Button>
                   </PopoverTrigger>
                   <PopoverContent className='w-80'>
                     <div className='flex flex-col gap-3'>
                       <p className='text-sm'>
-                        {t('channels.dialogs.keyManagement.confirmDeleteSelected', { count: selectedKeys.size })}
+                        {t('channels.dialogs.keyManagement.confirmEnableSelected', { count: selectedDisabledKeys.length })}
                       </p>
                       <div className='flex justify-end gap-2'>
-                        <Button size='sm' variant='outline' onClick={() => setConfirmDeleteSelected(false)}>
+                        <Button size='sm' variant='outline' onClick={() => setConfirmEnableSelected(false)}>
                           {t('common.buttons.cancel')}
                         </Button>
-                        <Button size='sm' variant='destructive' onClick={handleDeleteSelected} disabled={isPending}>
+                        <Button size='sm' onClick={handleEnableSelected} disabled={isPending}>
                           {t('common.buttons.confirm')}
                         </Button>
                       </div>
                     </div>
                   </PopoverContent>
                 </Popover>
+                {batchDisableBlockedByLastEnabled ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className='inline-flex'>
+                        <Button size='sm' variant='outline' disabled>
+                          <IconBan className='mr-1 h-3.5 w-3.5' />
+                          {t('channels.dialogs.keyManagement.disableSelected', { count: selectedEnabledKeys.length })}
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>{t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                ) : (
+                  <Popover open={confirmDisableSelected} onOpenChange={setConfirmDisableSelected}>
+                    <PopoverTrigger asChild>
+                      <Button size='sm' variant='outline' disabled={isPending || !canBatchDisable}>
+                        <IconBan className='mr-1 h-3.5 w-3.5' />
+                        {t('channels.dialogs.keyManagement.disableSelected', { count: selectedEnabledKeys.length })}
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className='w-80'>
+                      <div className='flex flex-col gap-3'>
+                        <p className='text-sm'>
+                          {t('channels.dialogs.keyManagement.confirmDisableSelected', { count: selectedEnabledKeys.length })}
+                        </p>
+                        <div className='flex justify-end gap-2'>
+                          <Button size='sm' variant='outline' onClick={() => setConfirmDisableSelected(false)}>
+                            {t('common.buttons.cancel')}
+                          </Button>
+                          <Button size='sm' onClick={handleDisableSelected} disabled={isPending}>
+                            {t('common.buttons.confirm')}
+                          </Button>
+                        </div>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                )}
+                {batchDeleteBlockedByLastKey || batchDeleteBlockedByLastEnabled ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className='inline-flex'>
+                        <Button size='sm' variant='outline' className='text-destructive' disabled>
+                          <IconTrash className='mr-1 h-3.5 w-3.5' />
+                          {t('channels.dialogs.keyManagement.deleteSelected', { count: selectedKeys.size })}
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>
+                        {batchDeleteBlockedByLastKey
+                          ? t('channels.dialogs.fields.apiKey.mustKeepOne')
+                          : t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')}
+                      </p>
+                    </TooltipContent>
+                  </Tooltip>
+                ) : (
+                  <Popover open={confirmDeleteSelected} onOpenChange={setConfirmDeleteSelected}>
+                    <PopoverTrigger asChild>
+                      <Button
+                        size='sm'
+                        variant='outline'
+                        className='text-destructive'
+                        disabled={isPending || selectedKeys.size === 0}
+                      >
+                        <IconTrash className='mr-1 h-3.5 w-3.5' />
+                        {t('channels.dialogs.keyManagement.deleteSelected', { count: selectedKeys.size })}
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className='w-80'>
+                      <div className='flex flex-col gap-3'>
+                        <p className='text-sm'>
+                          {t('channels.dialogs.keyManagement.confirmDeleteSelected', { count: selectedKeys.size })}
+                        </p>
+                        <div className='flex justify-end gap-2'>
+                          <Button size='sm' variant='outline' onClick={() => setConfirmDeleteSelected(false)}>
+                            {t('common.buttons.cancel')}
+                          </Button>
+                          <Button size='sm' variant='destructive' onClick={handleDeleteSelected} disabled={isPending}>
+                            {t('common.buttons.confirm')}
+                          </Button>
+                        </div>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                )}
               </div>
             </div>
 
@@ -480,6 +940,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                 <TableHeader>
                   <TableRow>
                     <TableHead className='w-12'></TableHead>
+                    {canEditKeyNames && <TableHead className='w-44'>{t('channels.dialogs.keyManagement.nameColumn')}</TableHead>}
                     <TableHead>{t('channels.dialogs.keyManagement.keyColumn')}</TableHead>
                     <TableHead className='w-40'>{t('channels.dialogs.keyManagement.statusColumn')}</TableHead>
                     <TableHead className='w-28'>{t('channels.dialogs.keyManagement.latencyColumn')}</TableHead>
@@ -489,22 +950,26 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                 <TableBody>
                   {disabledLoading && validKeys.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} className='h-24 text-center'>
+                      <TableCell colSpan={canEditKeyNames ? 6 : 5} className='h-24 text-center'>
                         <IconLoader2 className='text-muted-foreground mx-auto h-5 w-5 animate-spin' />
                       </TableCell>
                     </TableRow>
                   ) : validKeys.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} className='h-32 text-center text-sm text-muted-foreground'>
+                      <TableCell colSpan={canEditKeyNames ? 6 : 5} className='h-32 text-center text-sm text-muted-foreground'>
                         {t('channels.dialogs.keyManagement.noKeys')}
                       </TableCell>
                     </TableRow>
                   ) : (
-                    validKeys.map((key) => {
+                    validKeys.map((key, index) => {
                       const isTesting = testingKey === key;
                       const isDisabled = isKeyDisabled(key);
-                      const disabledKey = disabledKeys.find((item) => item.key === key);
+                      const disabledKey = activeDisabledKeys.find((item) => item.key === key);
                       const isQuotaDisabled = disabledKey?.quotaDisabled === true;
+                      const fallbackName = `key${index + 1}`;
+                      const customName = nameMap.get(key) ?? '';
+                      const isDuplicateName = Boolean(customName && duplicateNames.has(customName));
+                      const isEditingName = editingNameKey === key;
                       const result = getKeyResult(key);
                       const handleCopy = async () => {
                         try {
@@ -532,6 +997,119 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                               }}
                             />
                           </TableCell>
+                          {canEditKeyNames && (
+                            <TableCell>
+                              {isEditingName ? (
+                                <div className='space-y-1'>
+                                  <div className='flex items-center gap-1'>
+                                    <Input
+                                      value={editingNameValue}
+                                      placeholder={fallbackName}
+                                      onChange={(e) => {
+                                        setEditingNameValue(e.target.value);
+                                        if (editingNameError) {
+                                          setEditingNameError(null);
+                                        }
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          e.preventDefault();
+                                          skipNameBlurRef.current = true;
+                                          void handleSaveKeyName(key);
+                                        } else if (e.key === 'Escape') {
+                                          e.preventDefault();
+                                          skipNameBlurRef.current = true;
+                                          cancelEditingKeyName();
+                                        }
+                                      }}
+                                      onBlur={() => {
+                                        if (skipNameBlurRef.current) {
+                                          skipNameBlurRef.current = false;
+                                          return;
+                                        }
+                                        if (editingNameError) {
+                                          return;
+                                        }
+                                        void handleSaveKeyName(key);
+                                      }}
+                                      autoFocus
+                                      className='h-7 px-2 text-xs'
+                                      disabled={isPending}
+                                    />
+                                    <Button
+                                      type='button'
+                                      size='sm'
+                                      variant='ghost'
+                                      className='h-7 w-7 shrink-0 p-0'
+                                      onMouseDown={(e) => e.preventDefault()}
+                                      onClick={() => {
+                                        skipNameBlurRef.current = true;
+                                        void handleSaveKeyName(key);
+                                      }}
+                                      disabled={isPending}
+                                      aria-label={t('common.buttons.save')}
+                                    >
+                                      <IconCheck className='h-3.5 w-3.5' />
+                                    </Button>
+                                    <Button
+                                      type='button'
+                                      size='sm'
+                                      variant='ghost'
+                                      className='h-7 w-7 shrink-0 p-0'
+                                      onMouseDown={(e) => e.preventDefault()}
+                                      onClick={() => {
+                                        skipNameBlurRef.current = true;
+                                        cancelEditingKeyName();
+                                      }}
+                                      disabled={isPending}
+                                      aria-label={t('common.buttons.cancel')}
+                                    >
+                                      <IconX className='h-3.5 w-3.5' />
+                                    </Button>
+                                  </div>
+                                  {editingNameError && <p className='text-destructive text-xs'>{editingNameError}</p>}
+                                </div>
+                              ) : (
+                                <div className='flex items-center gap-1'>
+                                  <button
+                                    type='button'
+                                    onClick={() => startEditingKeyName(key)}
+                                    className={`hover:text-foreground truncate text-left text-sm ${
+                                      customName ? 'font-medium' : 'text-foreground font-normal'
+                                    }`}
+                                    title={customName || fallbackName}
+                                    disabled={isPending}
+                                  >
+                                    {customName || fallbackName}
+                                  </button>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        type='button'
+                                        size='sm'
+                                        variant='ghost'
+                                        className='h-6 w-6 shrink-0 p-0'
+                                        onClick={() => startEditingKeyName(key)}
+                                        disabled={isPending}
+                                        aria-label={t('channels.dialogs.keyManagement.editName')}
+                                      >
+                                        <IconPencil className='h-3.5 w-3.5' />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>{t('channels.dialogs.keyManagement.editName')}</TooltipContent>
+                                  </Tooltip>
+                                  {isDuplicateName && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <IconAlertTriangle className='h-3.5 w-3.5 shrink-0 text-amber-500' />
+                                      </TooltipTrigger>
+                                      <TooltipContent>{t('channels.dialogs.fields.apiKey.duplicateNameWarning')}</TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                </div>
+                              )}
+                            </TableCell>
+                          )}
                           <TableCell className='font-medium'>
                             <div className='flex items-center gap-2'>
                               {isTesting && <IconLoader2 className='h-3 w-3 animate-spin text-muted-foreground' />}
@@ -539,9 +1117,13 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                                 {result ? result.keyPrefix : maskAPIKey(key)}
                               </code>
                             </div>
-                            {isQuotaDisabled && (
-                              <div className='mt-1 text-xs text-muted-foreground'>
-                                {t('channels.dialogs.keyManagement.quotaDisabled')}
+                            {isDisabled && (disabledKey?.reason || (disabledKey?.errorCode != null && disabledKey.errorCode !== 0) || isQuotaDisabled) && (
+                              <div className='text-muted-foreground mt-1 flex flex-wrap items-center gap-1.5 text-xs'>
+                                {disabledKey?.reason && <span>{disabledKey.reason}</span>}
+                                {disabledKey?.errorCode != null && disabledKey.errorCode !== 0 && (
+                                  <span>{t('channels.dialogs.fields.apiKey.errorCodeBadge', { code: disabledKey.errorCode })}</span>
+                                )}
+                                {isQuotaDisabled && <span>{t('channels.dialogs.keyManagement.quotaDisabled')}</span>}
                               </div>
                             )}
                             {result?.error && (
@@ -571,7 +1153,14 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                             <div className='flex items-center gap-0.5'>
                               <Tooltip>
                                 <TooltipTrigger asChild>
-                                  <Button size='sm' variant='ghost' className='h-7 w-7 p-0' onClick={() => handleTestSingle(key)} disabled={isPending}>
+                                  <Button
+                                    size='sm'
+                                    variant='ghost'
+                                    className='h-7 w-7 p-0'
+                                    onClick={() => handleTestSingle(key)}
+                                    disabled={isPending}
+                                    aria-label={t('channels.dialogs.keyManagement.test')}
+                                  >
                                     <IconPlayerPlay className='h-4 w-4' />
                                   </Button>
                                 </TooltipTrigger>
@@ -579,7 +1168,13 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                               </Tooltip>
                               <Tooltip>
                                 <TooltipTrigger asChild>
-                                  <Button size='sm' variant='ghost' className='h-7 w-7 p-0' onClick={handleCopy}>
+                                  <Button
+                                    size='sm'
+                                    variant='ghost'
+                                    className='h-7 w-7 p-0'
+                                    onClick={handleCopy}
+                                    aria-label={t('channels.dialogs.keyManagement.copy')}
+                                  >
                                     <IconCopy className='h-4 w-4' />
                                   </Button>
                                 </TooltipTrigger>
@@ -589,11 +1184,22 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                               {isDisabled ? (
                                 <>
                                   <Popover open={confirmEnableKey === key} onOpenChange={(o) => setConfirmEnableKey(o ? key : null)}>
-                                    <PopoverTrigger asChild>
-                                      <Button size='sm' variant='ghost' className='h-7 w-7 p-0' disabled={isPending}>
-                                        <IconRefresh className='h-4 w-4' />
-                                      </Button>
-                                    </PopoverTrigger>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <PopoverTrigger asChild>
+                                          <Button
+                                            size='sm'
+                                            variant='ghost'
+                                            className='h-7 w-7 p-0'
+                                            disabled={isPending}
+                                            aria-label={t('channels.dialogs.keyManagement.enable')}
+                                          >
+                                            <IconCircleCheck className='h-4 w-4' />
+                                          </Button>
+                                        </PopoverTrigger>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{t('channels.dialogs.keyManagement.enable')}</TooltipContent>
+                                    </Tooltip>
                                     <PopoverContent className='w-64'>
                                       <div className='flex flex-col gap-3'>
                                         <p className='text-sm'>{t('channels.dialogs.keyManagement.confirmEnable')}</p>
@@ -638,11 +1244,26 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                                 </>
                               ) : (
                                 <Popover open={confirmDisableKey === key} onOpenChange={(o) => setConfirmDisableKey(o ? key : null)}>
-                                  <PopoverTrigger asChild>
-                                    <Button size='sm' variant='ghost' className='h-7 w-7 p-0' disabled={isPending || enabledCredentialCount <= 1}>
-                                      <IconAlertTriangle className='h-4 w-4' />
-                                    </Button>
-                                  </PopoverTrigger>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <PopoverTrigger asChild>
+                                        <Button
+                                          size='sm'
+                                          variant='ghost'
+                                          className='h-7 w-7 p-0'
+                                          disabled={isPending || enabledCredentialCount <= 1}
+                                          aria-label={t('channels.dialogs.keyManagement.disable')}
+                                        >
+                                          <IconBan className='h-4 w-4' />
+                                        </Button>
+                                      </PopoverTrigger>
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                      {enabledCredentialCount <= 1
+                                        ? t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')
+                                        : t('channels.dialogs.keyManagement.disable')}
+                                    </TooltipContent>
+                                  </Tooltip>
                                   <PopoverContent className='w-64'>
                                     <div className='flex flex-col gap-3'>
                                       <p className='text-sm'>{t('channels.dialogs.keyManagement.confirmDisable')}</p>
@@ -660,11 +1281,28 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                               )}
 
                               <Popover open={confirmDeleteKey === key} onOpenChange={(o) => setConfirmDeleteKey(o ? key : null)}>
-                                <PopoverTrigger asChild>
-                                  <Button size='sm' variant='ghost' className='text-destructive h-7 w-7 p-0' disabled={isPending || isLastKey}>
-                                    <IconTrash className='h-4 w-4' />
-                                  </Button>
-                                </PopoverTrigger>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <PopoverTrigger asChild>
+                                      <Button
+                                        size='sm'
+                                        variant='ghost'
+                                        className='text-destructive h-7 w-7 p-0'
+                                        disabled={isPending || isLastKey || (!isDisabled && enabledCredentialCount <= 1)}
+                                        aria-label={t('channels.dialogs.keyManagement.delete')}
+                                      >
+                                        <IconTrash className='h-4 w-4' />
+                                      </Button>
+                                    </PopoverTrigger>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    {isLastKey
+                                      ? t('channels.dialogs.fields.apiKey.mustKeepOne')
+                                      : !isDisabled && enabledCredentialCount <= 1
+                                        ? t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')
+                                        : t('channels.dialogs.keyManagement.delete')}
+                                  </TooltipContent>
+                                </Tooltip>
                                 <PopoverContent className='w-64'>
                                   <div className='flex flex-col gap-3'>
                                     <p className='text-sm'>{t('channels.dialogs.keyManagement.confirmDelete')}</p>
@@ -795,7 +1433,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                                   >
                                     <PopoverTrigger asChild>
                                       <Button size='sm' variant='ghost' className='h-7 w-7 p-0' disabled={isPending} aria-label={t('channels.dialogs.keyManagement.enable')}>
-                                        <IconRefresh className='h-4 w-4' />
+                                        <IconCircleCheck className='h-4 w-4' />
                                       </Button>
                                     </PopoverTrigger>
                                     <PopoverContent className='w-64'>
@@ -825,7 +1463,7 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                                         disabled={isPending || enabledCredentialCount <= 1 || credentialRef.length === 0}
                                         aria-label={t('channels.dialogs.keyManagement.disable')}
                                       >
-                                        <IconAlertTriangle className='h-4 w-4' />
+                                        <IconBan className='h-4 w-4' />
                                       </Button>
                                     </PopoverTrigger>
                                     <PopoverContent className='w-64'>
@@ -853,7 +1491,12 @@ export function ChannelsAPIKeyManagementDialog({ open, onOpenChange }: ChannelsA
                                       size='sm'
                                       variant='ghost'
                                       className='text-destructive h-7 w-7 p-0'
-                                      disabled={isPending || isLastKey || credentialRef.length === 0}
+                                      disabled={
+                                        isPending ||
+                                        isLastKey ||
+                                        credentialRef.length === 0 ||
+                                        (!isDisabled && enabledCredentialCount <= 1)
+                                      }
                                       aria-label={t('channels.dialogs.keyManagement.delete')}
                                     >
                                       <IconTrash className='h-4 w-4' />

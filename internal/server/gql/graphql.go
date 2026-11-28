@@ -137,6 +137,7 @@ func NewGraphqlHandlers(deps Dependencies) *GraphqlHandler {
 	})
 	gqlSrv.Use(&loggingTracer{})
 	gqlSrv.AroundOperations(apiKeyReadOnly)
+	gqlSrv.AroundOperations(withRequestCache)
 	gqlSrv.AroundResponses(endpointProtocolErrorStatus)
 	gqlSrv.Use(graphqlTransactions(deps.Ent))
 	gqlSrv.SetErrorPresenter(presentGraphqlError)
@@ -296,6 +297,7 @@ func configurePluginGraphQL(srv interface {
 	srv.Use(extension.FixedComplexityLimit(pluginGraphqlComplexityLimit))
 	srv.Use(&loggingTracer{})
 	srv.AroundOperations(rejectPluginGraphqlOperation)
+	srv.AroundOperations(withRequestCache)
 	srv.Use(graphqlTransactions(client))
 	srv.SetErrorPresenter(presentGraphqlError)
 }
@@ -345,20 +347,36 @@ func getNilableChannel(ctx context.Context, client *ent.Client, channelID int) (
 		return nil, nil
 	}
 
-	ch, err := client.Channel.Query().Where(channel.ID(channelID)).First(ctx)
-	if err != nil {
-		if ent.IsNotFound(err) {
-			return nil, nil
-		}
-
-		if errors.Is(err, privacy.Deny) {
-			return nil, nil
-		}
-
-		return nil, fmt.Errorf("failed to load channel: %w", err)
+	tx := ent.TxFromContext(ctx)
+	queryClient := client
+	if tx != nil {
+		queryClient = tx.Client()
 	}
 
-	return ch, nil
+	load := func() (*ent.Channel, error) {
+		ch, err := queryClient.Channel.Query().Where(channel.ID(channelID)).First(ctx)
+		if err != nil {
+			if ent.IsNotFound(err) {
+				return nil, nil
+			}
+
+			if errors.Is(err, privacy.Deny) {
+				return nil, nil
+			}
+
+			return nil, fmt.Errorf("failed to load channel: %w", err)
+		}
+
+		return ch, nil
+	}
+
+	if tx == nil {
+		if cache := requestCacheFromContext(ctx); cache != nil {
+			return cache.getOrLoadChannel(channelID, load)
+		}
+	}
+
+	return load()
 }
 
 func getNilableUser(ctx context.Context, client *ent.Client, userID int) (*ent.User, error) {

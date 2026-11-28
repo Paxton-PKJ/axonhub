@@ -1,13 +1,17 @@
 package objects
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/looplj/axonhub/internal/pkg/xerrors"
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/oauth"
@@ -496,6 +500,24 @@ func (dk DisabledAPIKey) IsExpired() bool {
 	return dk.ExpiresAt != nil && time.Now().After(*dk.ExpiresAt)
 }
 
+const MaxAPIKeyNameLength = 64
+
+// APIKeyName stores the human-readable display name for one channel credential ref.
+type APIKeyName struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+
+// CredentialFingerprint returns a non-reversible SHA-256 hex digest identifying
+// a credential without persisting plaintext secrets or truncating collision bits.
+func CredentialFingerprint(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(ref))
+	return hex.EncodeToString(sum[:])
+}
+
 type ChannelCredentials struct {
 	// APIKey is the API key for the channel, for the single key channel, e.g. Codex, Claude code, Antigravity.
 	// It is kept for backward compatibility with existing data, recommend to use OAuth instead.
@@ -507,6 +529,10 @@ type ChannelCredentials struct {
 	// APIKeys is a list of API keys for the channel.
 	// When multiple keys are provided, they will be used in a round-robin fashion.
 	APIKeys []string `json:"apiKeys,omitempty"`
+
+	// APIKeyNames maps credential identifiers to user-defined labels. Stored inside the
+	// sensitive credentials JSON so channel backup/restore preserves labels without extra columns.
+	APIKeyNames []APIKeyName `json:"apiKeyNames,omitempty"`
 
 	// VertexAPIKeys contains the project-bound credentials used by Gemini Vertex.
 	// The project and region must remain paired with the API key when keys rotate.
@@ -560,6 +586,43 @@ func (c *ChannelCredentials) GetAllAPIKeys() []string {
 	return keys
 }
 
+// GetFlatAPIKeys returns the channel's non-OAuth flat API keys, excluding any
+// Vertex project-bound triples so per-key names stay scoped to exposed flat keys.
+func (c *ChannelCredentials) GetFlatAPIKeys() []string {
+	if c == nil || c.IsOAuth() {
+		return nil
+	}
+
+	var vertexKeys map[string]struct{}
+	if len(c.VertexAPIKeys) > 0 {
+		vertexKeys = make(map[string]struct{}, len(c.VertexAPIKeys))
+		for _, credential := range c.VertexAPIKeys {
+			if credential.APIKey != "" {
+				vertexKeys[credential.APIKey] = struct{}{}
+			}
+		}
+	}
+
+	var keys []string
+	if c.APIKey != "" {
+		if _, isVertex := vertexKeys[c.APIKey]; !isVertex {
+			keys = append(keys, c.APIKey)
+		}
+	}
+
+	for _, key := range c.APIKeys {
+		if key == "" {
+			continue
+		}
+		if _, isVertex := vertexKeys[key]; isVertex {
+			continue
+		}
+		keys = append(keys, key)
+	}
+
+	return keys
+}
+
 // OAuthCredentialRef identifies the OAuth credential of a channel in the
 // auto-disable bookkeeping. A channel holds at most one OAuth credential, and
 // its access token is replaced on every refresh, so a fixed sentinel is used as
@@ -599,6 +662,94 @@ func (c *ChannelCredentials) GetEnabledCredentialRefs(disabledKeys []DisabledAPI
 // GetEnabledAPIKeys returns API keys that are not disabled.
 func (c *ChannelCredentials) GetEnabledAPIKeys(disabledKeys []DisabledAPIKey) []string {
 	return filterDisabled(c.GetAllAPIKeys(), disabledKeys)
+}
+
+// NameOf returns the trimmed display name configured for ref, or empty string if unset.
+func (c *ChannelCredentials) NameOf(ref string) string {
+	if c == nil || ref == "" || len(c.APIKeyNames) == 0 {
+		return ""
+	}
+	name := ""
+	for _, entry := range c.APIKeyNames {
+		if entry.Key == ref {
+			name = strings.TrimSpace(entry.Name)
+		}
+	}
+	return name
+}
+
+// NormalizeAPIKeyNames trims, validates, deduplicates (keeping the last entry per key),
+// and drops blank or orphaned entries relative to refs.
+func (c *ChannelCredentials) NormalizeAPIKeyNames(refs []string) error {
+	if c == nil {
+		return nil
+	}
+	cleaned, err := cleanAPIKeyNames(c.APIKeyNames, refs, true)
+	if err != nil {
+		return err
+	}
+	c.APIKeyNames = cleaned
+	return nil
+}
+
+// PruneAPIKeyNames removes empty and orphaned entries without failing on legacy lengths.
+func (c *ChannelCredentials) PruneAPIKeyNames(refs []string) {
+	if c == nil {
+		return
+	}
+	cleaned, _ := cleanAPIKeyNames(c.APIKeyNames, refs, false)
+	c.APIKeyNames = cleaned
+}
+
+func cleanAPIKeyNames(entries []APIKeyName, refs []string, validateLength bool) ([]APIKeyName, error) {
+	if len(entries) == 0 || len(refs) == 0 {
+		return nil, nil
+	}
+
+	refSet := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref != "" {
+			refSet[ref] = struct{}{}
+		}
+	}
+	if len(refSet) == 0 {
+		return nil, nil
+	}
+
+	lastIdx := make(map[string]int, len(entries))
+	for i, entry := range entries {
+		if entry.Key == "" {
+			continue
+		}
+		if _, exists := refSet[entry.Key]; !exists {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name)
+		if validateLength && utf8.RuneCountInString(name) > MaxAPIKeyNameLength {
+			return nil, xerrors.ValidationError(fmt.Sprintf("API key name must be at most %d characters", MaxAPIKeyNameLength))
+		}
+		lastIdx[entry.Key] = i
+	}
+
+	var normalized []APIKeyName
+	for i, entry := range entries {
+		idx, ok := lastIdx[entry.Key]
+		if !ok || idx != i {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			continue
+		}
+		normalized = append(normalized, APIKeyName{
+			Key:  entry.Key,
+			Name: name,
+		})
+	}
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+	return normalized, nil
 }
 
 func (c *ChannelCredentials) VertexAPIKey(apiKey string) (VertexAPIKey, bool) {

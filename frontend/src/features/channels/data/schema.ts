@@ -437,11 +437,25 @@ export const channelModelEntrySchema = z.object({
 });
 export type ChannelModelEntry = z.infer<typeof channelModelEntrySchema>;
 
+// API Key Name
+export const apiKeyNameSchema = z.object({
+  key: z.string(),
+  name: z.string(),
+});
+export type APIKeyName = z.infer<typeof apiKeyNameSchema>;
+
+export const channelAPIKeyStateChangesInputSchema = z.object({
+  enableKeys: z.array(z.string()).optional(),
+  disableKeys: z.array(z.string()).optional(),
+});
+export type ChannelAPIKeyStateChangesInput = z.infer<typeof channelAPIKeyStateChangesInputSchema>;
+
 // Channel Credentials
 export const channelCredentialsSchema = z.object({
   isOAuth: z.boolean().optional(),
   apiKey: z.string().optional().nullable(),
   apiKeys: z.array(z.string()).optional().nullable(),
+  apiKeyNames: z.array(apiKeyNameSchema).optional().nullable(),
   // Read-side shape only: persisted credentials are echoed for the form and may
   // predate the triple, so this schema must not reject stored data. Strict
   // validation lives on the write schemas below.
@@ -917,6 +931,7 @@ export const createChannelInputSchema = z
       apiKey: z.string().optional(),
       // apiKeys is used for regular API keys (multiple keys for load balancing)
       apiKeys: z.array(z.string()).optional().default([]),
+      apiKeyNames: z.array(apiKeyNameSchema).optional(),
       // Vertex credentials are project-bound triples; an omitted region defaults to global.
       vertexApiKeys: z.array(vertexAPIKeyShapeSchema).optional().default([]),
       // Service account rows: jsonData is validated per row on a gemini_vertex channel.
@@ -1020,6 +1035,7 @@ export const updateChannelInputSchema = z
         apiKey: z.string().optional(),
         // apiKeys 用于普通 API Key（支持多 key 负载均衡），OAuth 类型不使用此字段
         apiKeys: z.array(z.string()).optional(),
+        apiKeyNames: z.array(apiKeyNameSchema).optional(),
         // Vertex credentials are project-bound triples; an omitted region defaults to global.
         vertexApiKeys: z.array(vertexAPIKeyShapeSchema).optional(),
         // Service account rows: jsonData is validated per row on a gemini_vertex channel.

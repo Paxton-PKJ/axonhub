@@ -18,6 +18,7 @@ import {
   useEnableSelectedChannelAPIKeys,
   useDeleteDisabledChannelAPIKeys,
 } from '../data/channels';
+import { getAPIKeyNameMap, getDisabledKeyPosition } from '../utils/api-key-names';
 
 interface ChannelsDisabledAPIKeysDialogProps {
   open: boolean;
@@ -53,6 +54,7 @@ export function ChannelsDisabledAPIKeysDialog({ open, onOpenChange }: ChannelsDi
   const { data: disabledKeys = [], isLoading } = useChannelDisabledAPIKeys(currentRow?.id || '', {
     enabled: open && !!currentRow?.id,
   });
+  const keyNameMap = useMemo(() => getAPIKeyNameMap(currentRow?.credentials?.apiKeyNames), [currentRow?.credentials?.apiKeyNames]);
 
   const enableAPIKey = useEnableChannelAPIKey();
   const enableAllAPIKeys = useEnableAllChannelAPIKeys();
@@ -286,7 +288,19 @@ export function ChannelsDisabledAPIKeysDialog({ open, onOpenChange }: ChannelsDi
                                 {t('channels.dialogs.disabledAPIKeys.oauthCredential')}
                               </span>
                             ) : (
-                              <code className='bg-muted rounded px-2 py-0.5 font-mono text-sm'>****{dk.key.slice(-4)}</code>
+                              (() => {
+                                const customName = keyNameMap.get(dk.key);
+                                const position = getDisabledKeyPosition(dk.key, currentRow.credentials);
+                                const displayName = customName || (position != null ? `key${position}` : null);
+                                return (
+                                  <>
+                                    {displayName && (
+                                      <span className={customName ? 'text-sm font-medium' : 'text-sm'}>{displayName}</span>
+                                    )}
+                                    <code className='bg-muted rounded px-2 py-0.5 font-mono text-sm'>****{dk.key.slice(-4)}</code>
+                                  </>
+                                );
+                              })()
                             )}
                             <Tooltip>
                               <TooltipTrigger asChild>

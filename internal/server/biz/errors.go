@@ -3,6 +3,7 @@ package biz
 import (
 	"errors"
 
+	"github.com/looplj/axonhub/internal/pkg/xerrors"
 	"github.com/looplj/axonhub/llm/transformer"
 )
 
@@ -24,5 +25,8 @@ var (
 	// ErrChannelUpdatedConcurrently is returned when an optimistic-locked
 	// channel update loses the race against a concurrent commit. Read-merge-
 	// write callers can detect it with errors.Is and retry the merge.
-	ErrChannelUpdatedConcurrently = errors.New("channel was updated concurrently; retry the operation")
+	ErrChannelUpdatedConcurrently = xerrors.NewCodedError(
+		xerrors.ErrCodeChannelUpdatedConcurrently,
+		"channel was updated concurrently; retry the operation",
+	)
 )

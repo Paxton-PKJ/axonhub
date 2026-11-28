@@ -143,6 +143,22 @@ func WithChannelAPIKey(ctx context.Context, apiKey string) context.Context {
 	return withContainer(ctx, container)
 }
 
+// ClearChannelAPIKey clears any channel API key from the context container so
+// subsequent retry or failover attempts (including keyless channels) cannot
+// inherit the previous attempt's credential.
+func ClearChannelAPIKey(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	container, ok := ctx.Value(containerContextKey).(*ContextContainer)
+	if !ok || container == nil {
+		return
+	}
+	container.mu.Lock()
+	container.ChannelAPIKey = nil
+	container.mu.Unlock()
+}
+
 // GetChannelAPIKey retrieves the channel API key from the context.
 func GetChannelAPIKey(ctx context.Context) (string, bool) {
 	container := getContainer(ctx)

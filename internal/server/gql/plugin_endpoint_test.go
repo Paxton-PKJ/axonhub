@@ -157,6 +157,54 @@ func TestPluginGraphql(t *testing.T) {
 	require.Less(t, recorder.Body.Len(), 1024)
 }
 
+func TestPluginGraphql_ChannelAPIKeyMutations(t *testing.T) {
+	fx := newPluginEndpointFixture(t, "plugin_channel_apikey_mutations")
+	ctx := fx.setupCtx
+
+	ch, err := fx.db.Channel.Create().
+		SetName("plugin-key-mutations").
+		SetType(channel.TypeOpenai).
+		SetBaseURL("https://api.openai.com/v1").
+		SetCredentials(objects.ChannelCredentials{APIKeys: []string{"sk-plug-1", "sk-plug-2"}}).
+		SetSupportedModels([]string{"gpt-4"}).
+		SetDefaultTestModel("gpt-4").
+		Save(ctx)
+	require.NoError(t, err)
+	chGUID := fmt.Sprintf("gid://axonhub/Channel/%d", ch.ID)
+
+	disableMut := fmt.Sprintf(`mutation { disableSelectedChannelAPIKeys(channelID: %q, keys: ["sk-plug-1"]) }`, chGUID)
+	disableEmptyMut := fmt.Sprintf(`mutation { disableSelectedChannelAPIKeys(channelID: %q, keys: []) }`, chGUID)
+
+	// Plugin lacking write_channels must be denied even for a user with write_channels or on no-op inputs.
+	require.NoError(t, fx.manager.Enable(ctx, fx.pages.ID, []string{"read_channels"}, nil))
+	for _, mut := range []string{disableMut, disableEmptyMut} {
+		code, payload, raw := fx.postPlugin(fx.writerToken, pluginPagesID, mut)
+		require.Equal(t, http.StatusOK, code, raw)
+		require.Equal(t, "FORBIDDEN", graphqlErrorCode(t, payload), raw)
+	}
+
+	// Read-only user must be denied even when the plugin holds write_channels.
+	require.NoError(t, fx.manager.Enable(ctx, fx.pages.ID, []string{"read_channels", "write_channels"}, nil))
+	for _, mut := range []string{disableMut, disableEmptyMut} {
+		code, payload, raw := fx.postPlugin(fx.readerToken, pluginPagesID, mut)
+		require.Equal(t, http.StatusOK, code, raw)
+		require.Equal(t, "FORBIDDEN", graphqlErrorCode(t, payload), raw)
+	}
+
+	// Plugin with write_channels (even without read_channels) and writer user succeed.
+	require.NoError(t, fx.manager.Enable(ctx, fx.pages.ID, []string{"write_channels"}, nil))
+
+	code, payload, raw := fx.postPlugin(fx.writerToken, pluginPagesID, disableMut)
+	require.Equal(t, http.StatusOK, code, raw)
+	require.NotContains(t, payload, "errors", raw)
+	require.Equal(t, true, payload["data"].(map[string]any)["disableSelectedChannelAPIKeys"])
+
+	reloaded, err := fx.db.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	require.Len(t, reloaded.DisabledAPIKeys, 1)
+	require.Equal(t, "sk-plug-1", reloaded.DisabledAPIKeys[0].Key)
+}
+
 func TestPluginKVGraphqlPagination(t *testing.T) {
 	fx := newPluginEndpointFixture(t, "plugin_kv_pagination")
 	ctx := fx.setupCtx
@@ -730,6 +778,7 @@ var pluginMutationFieldSnapshot = []string{
 	"detectChannelEndpoints",
 	"disableChannelAPIKey",
 	"disablePlugin",
+	"disableSelectedChannelAPIKeys",
 	"duplicateChannel",
 	"enableAllChannelAPIKeys",
 	"enableChannelAPIKey",

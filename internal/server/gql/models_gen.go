@@ -181,6 +181,12 @@ type BulkUpdateChannelOrderingResult struct {
 	Channels []*ent.Channel `json:"channels"`
 }
 
+type ChannelAPIKeyLabel struct {
+	Name    *string `json:"name,omitempty"`
+	Index   *int    `json:"index,omitempty"`
+	Deleted bool    `json:"deleted"`
+}
+
 // ChannelLimiterStats is a point-in-time snapshot of the per-channel concurrency limiter.
 type ChannelLimiterStats struct {
 	// Number of requests currently holding a capacity slot.

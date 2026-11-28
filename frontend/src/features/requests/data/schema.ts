@@ -16,6 +16,14 @@ export type RequestSource = z.infer<typeof requestSourceSchema>;
 export const requestExecutionStatusSchema = z.enum(['pending', 'processing', 'completed', 'failed', 'canceled']);
 export type RequestExecutionStatus = z.infer<typeof requestExecutionStatusSchema>;
 
+// Request Execution Label
+export const channelAPIKeyLabelSchema = z.object({
+  name: z.string().nullable().optional(),
+  index: z.number().nullable().optional(),
+  deleted: z.boolean(),
+});
+export type ChannelAPIKeyLabel = z.infer<typeof channelAPIKeyLabelSchema>;
+
 // Request Execution
 export const requestExecutionSchema = z.object({
   id: z.string(),
@@ -29,6 +37,7 @@ export const requestExecutionSchema = z.object({
   // Null for single-key/OAuth channels and for executions recorded before the
   // field existed.
   channelAPIKeyIndex: z.number().nullable().optional(),
+  channelAPIKeyLabel: channelAPIKeyLabelSchema.nullable().optional(),
   modelID: z.string(),
   upstreamModelID: z.string().nullable().optional(),
   requestHeaders: z.any().nullable().optional(),

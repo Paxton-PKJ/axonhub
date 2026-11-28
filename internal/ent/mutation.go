@@ -25541,6 +25541,7 @@ type RequestExecutionMutation struct {
 	format                            *string
 	reasoning_effort                  *string
 	channel_api_key_suffix            *string
+	channel_api_key_fingerprint       *string
 	request_body                      *objects.JSONRawMessage
 	appendrequest_body                objects.JSONRawMessage
 	request_body_chunked              *bool
@@ -26276,6 +26277,55 @@ func (m *RequestExecutionMutation) ChannelAPIKeySuffixCleared() bool {
 func (m *RequestExecutionMutation) ResetChannelAPIKeySuffix() {
 	m.channel_api_key_suffix = nil
 	delete(m.clearedFields, requestexecution.FieldChannelAPIKeySuffix)
+}
+
+// SetChannelAPIKeyFingerprint sets the "channel_api_key_fingerprint" field.
+func (m *RequestExecutionMutation) SetChannelAPIKeyFingerprint(s string) {
+	m.channel_api_key_fingerprint = &s
+}
+
+// ChannelAPIKeyFingerprint returns the value of the "channel_api_key_fingerprint" field in the mutation.
+func (m *RequestExecutionMutation) ChannelAPIKeyFingerprint() (r string, exists bool) {
+	v := m.channel_api_key_fingerprint
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChannelAPIKeyFingerprint returns the old "channel_api_key_fingerprint" field's value of the RequestExecution entity.
+// If the RequestExecution object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RequestExecutionMutation) OldChannelAPIKeyFingerprint(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChannelAPIKeyFingerprint is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChannelAPIKeyFingerprint requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChannelAPIKeyFingerprint: %w", err)
+	}
+	return oldValue.ChannelAPIKeyFingerprint, nil
+}
+
+// ClearChannelAPIKeyFingerprint clears the value of the "channel_api_key_fingerprint" field.
+func (m *RequestExecutionMutation) ClearChannelAPIKeyFingerprint() {
+	m.channel_api_key_fingerprint = nil
+	m.clearedFields[requestexecution.FieldChannelAPIKeyFingerprint] = struct{}{}
+}
+
+// ChannelAPIKeyFingerprintCleared returns if the "channel_api_key_fingerprint" field was cleared in this mutation.
+func (m *RequestExecutionMutation) ChannelAPIKeyFingerprintCleared() bool {
+	_, ok := m.clearedFields[requestexecution.FieldChannelAPIKeyFingerprint]
+	return ok
+}
+
+// ResetChannelAPIKeyFingerprint resets all changes to the "channel_api_key_fingerprint" field.
+func (m *RequestExecutionMutation) ResetChannelAPIKeyFingerprint() {
+	m.channel_api_key_fingerprint = nil
+	delete(m.clearedFields, requestexecution.FieldChannelAPIKeyFingerprint)
 }
 
 // SetRequestBody sets the "request_body" field.
@@ -27280,7 +27330,7 @@ func (m *RequestExecutionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RequestExecutionMutation) Fields() []string {
-	fields := make([]string, 0, 28)
+	fields := make([]string, 0, 29)
 	if m.created_at != nil {
 		fields = append(fields, requestexecution.FieldCreatedAt)
 	}
@@ -27319,6 +27369,9 @@ func (m *RequestExecutionMutation) Fields() []string {
 	}
 	if m.channel_api_key_suffix != nil {
 		fields = append(fields, requestexecution.FieldChannelAPIKeySuffix)
+	}
+	if m.channel_api_key_fingerprint != nil {
+		fields = append(fields, requestexecution.FieldChannelAPIKeyFingerprint)
 	}
 	if m.request_body != nil {
 		fields = append(fields, requestexecution.FieldRequestBody)
@@ -27399,6 +27452,8 @@ func (m *RequestExecutionMutation) Field(name string) (ent.Value, bool) {
 		return m.ReasoningEffort()
 	case requestexecution.FieldChannelAPIKeySuffix:
 		return m.ChannelAPIKeySuffix()
+	case requestexecution.FieldChannelAPIKeyFingerprint:
+		return m.ChannelAPIKeyFingerprint()
 	case requestexecution.FieldRequestBody:
 		return m.RequestBody()
 	case requestexecution.FieldRequestBodyChunked:
@@ -27464,6 +27519,8 @@ func (m *RequestExecutionMutation) OldField(ctx context.Context, name string) (e
 		return m.OldReasoningEffort(ctx)
 	case requestexecution.FieldChannelAPIKeySuffix:
 		return m.OldChannelAPIKeySuffix(ctx)
+	case requestexecution.FieldChannelAPIKeyFingerprint:
+		return m.OldChannelAPIKeyFingerprint(ctx)
 	case requestexecution.FieldRequestBody:
 		return m.OldRequestBody(ctx)
 	case requestexecution.FieldRequestBodyChunked:
@@ -27593,6 +27650,13 @@ func (m *RequestExecutionMutation) SetField(name string, value ent.Value) error 
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetChannelAPIKeySuffix(v)
+		return nil
+	case requestexecution.FieldChannelAPIKeyFingerprint:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChannelAPIKeyFingerprint(v)
 		return nil
 	case requestexecution.FieldRequestBody:
 		v, ok := value.(objects.JSONRawMessage)
@@ -27825,6 +27889,9 @@ func (m *RequestExecutionMutation) ClearedFields() []string {
 	if m.FieldCleared(requestexecution.FieldChannelAPIKeySuffix) {
 		fields = append(fields, requestexecution.FieldChannelAPIKeySuffix)
 	}
+	if m.FieldCleared(requestexecution.FieldChannelAPIKeyFingerprint) {
+		fields = append(fields, requestexecution.FieldChannelAPIKeyFingerprint)
+	}
 	if m.FieldCleared(requestexecution.FieldResponseHeaders) {
 		fields = append(fields, requestexecution.FieldResponseHeaders)
 	}
@@ -27889,6 +27956,9 @@ func (m *RequestExecutionMutation) ClearField(name string) error {
 		return nil
 	case requestexecution.FieldChannelAPIKeySuffix:
 		m.ClearChannelAPIKeySuffix()
+		return nil
+	case requestexecution.FieldChannelAPIKeyFingerprint:
+		m.ClearChannelAPIKeyFingerprint()
 		return nil
 	case requestexecution.FieldResponseHeaders:
 		m.ClearResponseHeaders()
@@ -27966,6 +28036,9 @@ func (m *RequestExecutionMutation) ResetField(name string) error {
 		return nil
 	case requestexecution.FieldChannelAPIKeySuffix:
 		m.ResetChannelAPIKeySuffix()
+		return nil
+	case requestexecution.FieldChannelAPIKeyFingerprint:
+		m.ResetChannelAPIKeyFingerprint()
 		return nil
 	case requestexecution.FieldRequestBody:
 		m.ResetRequestBody()

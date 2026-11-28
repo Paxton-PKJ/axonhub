@@ -15,6 +15,10 @@ const (
 	ErrCodeInvalidInput ErrorCode = "INVALID_INPUT"
 	// ErrCodeValidationFailed indicates validation failure.
 	ErrCodeValidationFailed ErrorCode = "VALIDATION_FAILED"
+	// ErrCodeMustKeepOneEnabledAPIKey indicates disabling would leave no usable API key.
+	ErrCodeMustKeepOneEnabledAPIKey ErrorCode = "MUST_KEEP_ONE_ENABLED_API_KEY"
+	// ErrCodeChannelUpdatedConcurrently indicates an optimistic-locked channel update lost a race.
+	ErrCodeChannelUpdatedConcurrently ErrorCode = "CHANNEL_UPDATED_CONCURRENTLY"
 
 	// ErrCodeDuplicateName indicates duplicate name conflict.
 	ErrCodeDuplicateName ErrorCode = "DUPLICATE_NAME"

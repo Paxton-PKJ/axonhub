@@ -120,6 +120,11 @@ func ChannelAPIKeySuffix(v string) predicate.RequestExecution {
 	return predicate.RequestExecution(sql.FieldEQ(FieldChannelAPIKeySuffix, v))
 }
 
+// ChannelAPIKeyFingerprint applies equality check predicate on the "channel_api_key_fingerprint" field. It's identical to ChannelAPIKeyFingerprintEQ.
+func ChannelAPIKeyFingerprint(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldEQ(FieldChannelAPIKeyFingerprint, v))
+}
+
 // RequestBodyChunked applies equality check predicate on the "request_body_chunked" field. It's identical to RequestBodyChunkedEQ.
 func RequestBodyChunked(v bool) predicate.RequestExecution {
 	return predicate.RequestExecution(sql.FieldEQ(FieldRequestBodyChunked, v))
@@ -843,6 +848,81 @@ func ChannelAPIKeySuffixEqualFold(v string) predicate.RequestExecution {
 // ChannelAPIKeySuffixContainsFold applies the ContainsFold predicate on the "channel_api_key_suffix" field.
 func ChannelAPIKeySuffixContainsFold(v string) predicate.RequestExecution {
 	return predicate.RequestExecution(sql.FieldContainsFold(FieldChannelAPIKeySuffix, v))
+}
+
+// ChannelAPIKeyFingerprintEQ applies the EQ predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintEQ(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldEQ(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintNEQ applies the NEQ predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintNEQ(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldNEQ(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintIn applies the In predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintIn(vs ...string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldIn(FieldChannelAPIKeyFingerprint, vs...))
+}
+
+// ChannelAPIKeyFingerprintNotIn applies the NotIn predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintNotIn(vs ...string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldNotIn(FieldChannelAPIKeyFingerprint, vs...))
+}
+
+// ChannelAPIKeyFingerprintGT applies the GT predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintGT(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldGT(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintGTE applies the GTE predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintGTE(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldGTE(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintLT applies the LT predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintLT(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldLT(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintLTE applies the LTE predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintLTE(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldLTE(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintContains applies the Contains predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintContains(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldContains(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintHasPrefix applies the HasPrefix predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintHasPrefix(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldHasPrefix(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintHasSuffix applies the HasSuffix predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintHasSuffix(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldHasSuffix(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintIsNil applies the IsNil predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintIsNil() predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldIsNull(FieldChannelAPIKeyFingerprint))
+}
+
+// ChannelAPIKeyFingerprintNotNil applies the NotNil predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintNotNil() predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldNotNull(FieldChannelAPIKeyFingerprint))
+}
+
+// ChannelAPIKeyFingerprintEqualFold applies the EqualFold predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintEqualFold(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldEqualFold(FieldChannelAPIKeyFingerprint, v))
+}
+
+// ChannelAPIKeyFingerprintContainsFold applies the ContainsFold predicate on the "channel_api_key_fingerprint" field.
+func ChannelAPIKeyFingerprintContainsFold(v string) predicate.RequestExecution {
+	return predicate.RequestExecution(sql.FieldContainsFold(FieldChannelAPIKeyFingerprint, v))
 }
 
 // RequestBodyChunkedEQ applies the EQ predicate on the "request_body_chunked" field.

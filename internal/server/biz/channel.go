@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/aptible/supercronic/cronexpr"
 	"github.com/samber/lo"
 	"go.uber.org/fx"
@@ -26,6 +27,7 @@ import (
 	"github.com/looplj/axonhub/internal/pkg/xcache"
 	"github.com/looplj/axonhub/internal/pkg/xcache/live"
 	"github.com/looplj/axonhub/internal/pkg/xerrors"
+	"github.com/looplj/axonhub/internal/pkg/xtime"
 	"github.com/looplj/axonhub/internal/scopes"
 	"github.com/looplj/axonhub/internal/server/biz/provider_quota"
 	"github.com/looplj/axonhub/internal/server/events"
@@ -672,7 +674,16 @@ func (svc *ChannelService) createChannel(ctx context.Context, input ent.CreateCh
 		return nil, err
 	}
 
-	createBuilder := svc.entFromContext(ctx).Channel.Create().
+	if channelSupportsAPIKeyNames(input.Type, input.Credentials) {
+		if err := input.Credentials.NormalizeAPIKeyNames(input.Credentials.GetFlatAPIKeys()); err != nil {
+			return nil, err
+		}
+	} else {
+		input.Credentials.APIKeyNames = nil
+	}
+
+	db := svc.entFromContext(ctx)
+	createBuilder := db.Channel.Create().
 		SetType(input.Type).
 		SetNillableBaseURL(input.BaseURL).
 		SetNillableRemark(input.Remark).
@@ -695,6 +706,12 @@ func (svc *ChannelService) createChannel(ctx context.Context, input ent.CreateCh
 
 	if input.Policies != nil {
 		createBuilder.SetPolicies(*input.Policies)
+	}
+
+	if db.Driver().Dialect() == dialect.MySQL {
+		// MySQL TIMESTAMP stores whole seconds and rounds >=500ms upward;
+		// truncate on insert so the returned UpdatedAt matches the persisted value.
+		createBuilder.SetUpdatedAt(xtime.UTCNow().Truncate(time.Second))
 	}
 
 	channel, err := createBuilder.Save(ctx)
@@ -937,12 +954,33 @@ func normalizeAutoDisableRules(rules []objects.APIKeyAutoDisableRule, allowDelet
 	return normalized, nil
 }
 
+// nextChannelUpdatedAt guarantees a strictly newer updated_at timestamp at the
+// storage precision of the active SQL dialect (whole seconds on MySQL TIMESTAMP,
+// microseconds on SQLite/PostgreSQL) so rapid sequential or concurrent
+// optimistic-locked writes never collide on the same clock tick.
+func nextChannelUpdatedAt(dialectName string, prev time.Time) time.Time {
+	now := xtime.UTCNow()
+	if dialectName == dialect.MySQL {
+		prevSec := prev.UTC().Truncate(time.Second)
+		nowSec := now.Truncate(time.Second)
+		if !nowSec.After(prevSec) {
+			return prevSec.Add(time.Second)
+		}
+		return nowSec
+	}
+	if !now.Truncate(time.Microsecond).After(prev.Truncate(time.Microsecond)) {
+		return prev.Add(time.Microsecond)
+	}
+	return now
+}
+
 // UpdateChannel updates a channel with the provided input. Callers that
 // merge patches onto a previously read snapshot (see UpdateChannelSettings)
 // can carry the snapshot's version in the context via withChannelExpectedVersion;
 // the update is then optimistic-locked against that version and fails with
 // ErrChannelUpdatedConcurrently when the channel was updated concurrently.
-func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent.UpdateChannelInput) (*ent.Channel, error) {
+// UpdateChannel updates an existing channel and optionally applies atomic API key enable/disable changes.
+func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent.UpdateChannelInput, apiKeyStateChanges ...*ChannelAPIKeyStateChanges) (*ent.Channel, error) {
 	// Reject Realtime before provider normalization can discard submitted endpoints.
 	if slices.ContainsFunc(input.Endpoints, func(endpoint objects.ChannelEndpoint) bool {
 		return objects.IsRealtimeAPIFormat(endpoint.APIFormat)
@@ -967,6 +1005,9 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load channel provider identity: %w", err)
+	}
+	if expectedUpdatedAt != nil && !existingIdentity.UpdatedAt.Equal(*expectedUpdatedAt) {
+		return nil, ErrChannelUpdatedConcurrently
 	}
 
 	effectiveType := existingIdentity.Type
@@ -1163,12 +1204,33 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 		}
 	}
 
-	if input.Credentials != nil {
-		svc.apiKeyOpsLock.Lock()
+	var stateChanges *ChannelAPIKeyStateChanges
+	for _, changes := range apiKeyStateChanges {
+		if changes.HasChanges() {
+			stateChanges = changes
+			break
+		}
 	}
 
-	var updated *ent.Channel
-	providerIdentityChanged := false
+	needsAPIKeyLock := input.Credentials != nil && stateChanges == nil && expectedUpdatedAt == nil
+	apiKeyLockHeld := false
+	if needsAPIKeyLock {
+		svc.apiKeyOpsLock.Lock()
+		apiKeyLockHeld = true
+		defer func() {
+			if apiKeyLockHeld {
+				svc.apiKeyOpsLock.Unlock()
+			}
+		}()
+	}
+
+	var (
+		updated                 *ent.Channel
+		providerIdentityChanged bool
+		postCommitFinalDisabled []objects.DisabledAPIKey
+		postCommitEnabledKeys   []string
+		postCommitDisabledKeys  []objects.DisabledAPIKey
+	)
 	clearStaleQuotaSettings := input.Settings == nil && input.Type != nil &&
 		!isCommandCodeChannelType(*input.Type)
 	err = svc.RunInTransaction(ctx, func(ctx context.Context) error {
@@ -1184,13 +1246,6 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 			SetNillableDefaultTestModel(input.DefaultTestModel).
 			SetNillableOrderingWeight(input.OrderingWeight).
 			SetNillableAutoSyncSupportedModels(input.AutoSyncSupportedModels)
-		if guardProviderIdentity {
-			guardUpdatedAt := existingIdentity.UpdatedAt
-			if expectedUpdatedAt != nil {
-				guardUpdatedAt = *expectedUpdatedAt
-			}
-			mut.Where(channel.UpdatedAtEQ(guardUpdatedAt))
-		}
 
 		if input.SupportedModels != nil {
 			mut.SetSupportedModels(input.SupportedModels)
@@ -1224,15 +1279,20 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 			mut.SetPolicies(*input.Policies)
 		}
 
-		if input.Credentials != nil || input.Type != nil {
-			existing, err := db.Channel.Query().
-				Where(channel.IDEQ(id)).
-				Select(channel.FieldType, channel.FieldCredentials, channel.FieldDisabledAPIKeys,
-					channel.FieldStatus, channel.FieldErrorMessage, channel.FieldAutoDisabledAt, channel.FieldName).
-				Only(ctx)
+		var existingUpdatedAt *time.Time
+		if input.Credentials != nil || input.Type != nil || stateChanges != nil {
+			existing, err := authz.RunWithScopeDecision(ctx, scopes.ScopeWriteChannels, func(queryCtx context.Context) (*ent.Channel, error) {
+				return db.Channel.Query().
+					Where(channel.IDEQ(id)).
+					Select(channel.FieldID, channel.FieldType, channel.FieldBaseURL, channel.FieldCredentials, channel.FieldDisabledAPIKeys,
+						channel.FieldStatus, channel.FieldErrorMessage, channel.FieldAutoDisabledAt, channel.FieldName, channel.FieldUpdatedAt).
+					Only(queryCtx)
+			})
 			if err != nil {
 				return fmt.Errorf("failed to load existing channel credentials: %w", err)
 			}
+			ts := existing.UpdatedAt
+			existingUpdatedAt = &ts
 			effectiveType := existing.Type
 			if input.Type != nil {
 				effectiveType = *input.Type
@@ -1240,6 +1300,9 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 			credentials := existing.Credentials
 			if input.Credentials != nil {
 				credentials = *input.Credentials
+				if input.Credentials.APIKeyNames == nil {
+					credentials.APIKeyNames = existing.Credentials.APIKeyNames
+				}
 			}
 			if credentials.ManagementAPIKey == "" && isZenmuxChannelType(effectiveType) {
 				credentials.ManagementAPIKey = existing.Credentials.ManagementAPIKey
@@ -1247,15 +1310,43 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 			if err := ValidateVertexAPIKeys(effectiveType, credentials); err != nil {
 				return err
 			}
-			if input.Credentials != nil {
+
+			credentialsChanged := input.Credentials != nil
+			if channelSupportsAPIKeyNames(effectiveType, credentials) {
+				if input.Credentials != nil {
+					if input.Credentials.APIKeyNames == nil {
+						credentials.PruneAPIKeyNames(credentials.GetFlatAPIKeys())
+					} else if err := credentials.NormalizeAPIKeyNames(credentials.GetFlatAPIKeys()); err != nil {
+						return err
+					}
+				}
+			} else if len(credentials.APIKeyNames) > 0 {
+				credentials.APIKeyNames = nil
+				credentialsChanged = true
+			}
+			if credentialsChanged {
 				mut.SetCredentials(credentials)
-				if len(existing.Credentials.VertexServiceAccounts) > 0 || len(credentials.VertexServiceAccounts) > 0 {
-					refs := credentials.GetAllCredentialRefs()
-					disabledKeys := lo.Filter(existing.DisabledAPIKeys, func(disabled objects.DisabledAPIKey, _ int) bool {
-						return lo.Contains(refs, disabled.Key)
-					})
-					mut.SetDisabledAPIKeys(disabledKeys)
-					mut = applyRecoveredChannelStatus(ctx, mut, existing, credentials, disabledKeys)
+			}
+
+			if input.Credentials != nil || stateChanges != nil {
+				applied, err := applyChannelAPIKeyStateChanges(
+					credentials,
+					existing.DisabledAPIKeys,
+					stateChanges,
+					input.Credentials != nil,
+					time.Now(),
+				)
+				if err != nil {
+					return err
+				}
+				if applied.changed {
+					mut.SetDisabledAPIKeys(applied.disabledKeys)
+					postCommitFinalDisabled = applied.disabledKeys
+					postCommitEnabledKeys = applied.enabledKeys
+					postCommitDisabledKeys = applied.disabledApplied
+				}
+				if input.Credentials != nil || applied.changed {
+					mut = applyRecoveredChannelStatus(ctx, mut, existing, credentials, applied.disabledKeys)
 				}
 			}
 		}
@@ -1282,12 +1373,50 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 			mut.ClearErrorMessage()
 		}
 
+		dialectName := db.Driver().Dialect()
+		guardVersion := guardProviderIdentity || stateChanges != nil
+		if guardVersion {
+			guardUpdatedAt := existingIdentity.UpdatedAt
+			if existingUpdatedAt != nil {
+				if expectedUpdatedAt != nil && !existingUpdatedAt.Equal(*expectedUpdatedAt) {
+					return ErrChannelUpdatedConcurrently
+				}
+				if guardProviderIdentity && !existingUpdatedAt.Equal(existingIdentity.UpdatedAt) {
+					return ErrChannelUpdatedConcurrently
+				}
+				guardUpdatedAt = *existingUpdatedAt
+			}
+			mut.Where(channel.UpdatedAtEQ(guardUpdatedAt)).
+				SetUpdatedAt(nextChannelUpdatedAt(dialectName, guardUpdatedAt))
+		} else if existingUpdatedAt != nil {
+			// Ensure credential/type updates strictly advance updated_at so a stale
+			// expectedUpdatedAt check never misses a same-tick rotation.
+			mut.SetUpdatedAt(nextChannelUpdatedAt(dialectName, *existingUpdatedAt))
+		} else if dialectName == dialect.MySQL {
+			mut.SetUpdatedAt(nextChannelUpdatedAt(dialectName, existingIdentity.UpdatedAt))
+		}
+
 		channel, err := mut.Save(ctx)
 		if err != nil {
 			if ent.IsNotFound(err) {
 				return ErrChannelUpdatedConcurrently
 			}
 			return fmt.Errorf("failed to update channel: %w", err)
+		}
+		if len(postCommitEnabledKeys) > 0 || len(postCommitDisabledKeys) > 0 {
+			chSnapshot := channel
+			finalDisabled := postCommitFinalDisabled
+			enabledSnapshot := postCommitEnabledKeys
+			disabledSnapshot := postCommitDisabledKeys
+			finalStatus := channel.Status
+			runAfterCommit(ctx, func(afterCtx context.Context) {
+				if len(enabledSnapshot) > 0 {
+					svc.publishCredentialEnabled(afterCtx, chSnapshot, enabledSnapshot, finalDisabled, credentialTriggerManual)
+				}
+				for _, dk := range disabledSnapshot {
+					svc.publishCredentialDisabled(afterCtx, chSnapshot, dk.Key, dk.ErrorCode, dk.Reason, dk.ExpiresAt, finalStatus)
+				}
+			})
 		}
 		if guardProviderIdentity {
 			providerIdentityChanged = channel.Type != existingIdentity.Type ||
@@ -1304,8 +1433,9 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 
 		return nil
 	})
-	if input.Credentials != nil {
+	if apiKeyLockHeld {
 		svc.apiKeyOpsLock.Unlock()
+		apiKeyLockHeld = false
 	}
 	if err != nil {
 		return nil, err

@@ -144,12 +144,16 @@ func (i *UpdateChannelSettingsInput) Apply(base *objects.ChannelSettings) object
 // never crosses an API boundary.
 type channelExpectedVersionKey struct{}
 
-// withChannelExpectedVersion returns a context whose channel updates are
+// WithExpectedChannelVersion returns a context whose channel updates are
 // optimistic-locked against the given version: UpdateChannel fails with
 // ErrChannelUpdatedConcurrently when the stored version differs, so the
-// caller can detect the conflict and re-merge.
-func withChannelExpectedVersion(ctx context.Context, updatedAt time.Time) context.Context {
+// caller can detect the conflict and re-merge or refresh.
+func WithExpectedChannelVersion(ctx context.Context, updatedAt time.Time) context.Context {
 	return context.WithValue(ctx, channelExpectedVersionKey{}, &updatedAt)
+}
+
+func withChannelExpectedVersion(ctx context.Context, updatedAt time.Time) context.Context {
+	return WithExpectedChannelVersion(ctx, updatedAt)
 }
 
 // UpdateChannelSettings applies a partial settings patch to a channel and

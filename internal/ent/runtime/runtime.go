@@ -1122,16 +1122,20 @@ func init() {
 	requestexecutionDescChannelAPIKeySuffix := requestexecutionFields[10].Descriptor()
 	// requestexecution.ChannelAPIKeySuffixValidator is a validator for the "channel_api_key_suffix" field. It is called by the builders before save.
 	requestexecution.ChannelAPIKeySuffixValidator = requestexecutionDescChannelAPIKeySuffix.Validators[0].(func(string) error)
+	// requestexecutionDescChannelAPIKeyFingerprint is the schema descriptor for channel_api_key_fingerprint field.
+	requestexecutionDescChannelAPIKeyFingerprint := requestexecutionFields[11].Descriptor()
+	// requestexecution.ChannelAPIKeyFingerprintValidator is a validator for the "channel_api_key_fingerprint" field. It is called by the builders before save.
+	requestexecution.ChannelAPIKeyFingerprintValidator = requestexecutionDescChannelAPIKeyFingerprint.Validators[0].(func(string) error)
 	// requestexecutionDescRequestBodyChunked is the schema descriptor for request_body_chunked field.
-	requestexecutionDescRequestBodyChunked := requestexecutionFields[12].Descriptor()
+	requestexecutionDescRequestBodyChunked := requestexecutionFields[13].Descriptor()
 	// requestexecution.DefaultRequestBodyChunked holds the default value on creation for the request_body_chunked field.
 	requestexecution.DefaultRequestBodyChunked = requestexecutionDescRequestBodyChunked.Default.(bool)
 	// requestexecutionDescStream is the schema descriptor for stream field.
-	requestexecutionDescStream := requestexecutionFields[19].Descriptor()
+	requestexecutionDescStream := requestexecutionFields[20].Descriptor()
 	// requestexecution.DefaultStream holds the default value on creation for the stream field.
 	requestexecution.DefaultStream = requestexecutionDescStream.Default.(bool)
 	// requestexecutionDescPassThroughApplied is the schema descriptor for pass_through_applied field.
-	requestexecutionDescPassThroughApplied := requestexecutionFields[25].Descriptor()
+	requestexecutionDescPassThroughApplied := requestexecutionFields[26].Descriptor()
 	// requestexecution.DefaultPassThroughApplied holds the default value on creation for the pass_through_applied field.
 	requestexecution.DefaultPassThroughApplied = requestexecutionDescPassThroughApplied.Default.(bool)
 	roleMixin := schema.Role{}.Mixin()

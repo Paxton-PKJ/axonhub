@@ -193,6 +193,20 @@ func (_c *RequestExecutionCreate) SetNillableChannelAPIKeySuffix(v *string) *Req
 	return _c
 }
 
+// SetChannelAPIKeyFingerprint sets the "channel_api_key_fingerprint" field.
+func (_c *RequestExecutionCreate) SetChannelAPIKeyFingerprint(v string) *RequestExecutionCreate {
+	_c.mutation.SetChannelAPIKeyFingerprint(v)
+	return _c
+}
+
+// SetNillableChannelAPIKeyFingerprint sets the "channel_api_key_fingerprint" field if the given value is not nil.
+func (_c *RequestExecutionCreate) SetNillableChannelAPIKeyFingerprint(v *string) *RequestExecutionCreate {
+	if v != nil {
+		_c.SetChannelAPIKeyFingerprint(*v)
+	}
+	return _c
+}
+
 // SetRequestBody sets the "request_body" field.
 func (_c *RequestExecutionCreate) SetRequestBody(v objects.JSONRawMessage) *RequestExecutionCreate {
 	_c.mutation.SetRequestBody(v)
@@ -474,6 +488,11 @@ func (_c *RequestExecutionCreate) check() error {
 			return &ValidationError{Name: "channel_api_key_suffix", err: fmt.Errorf(`ent: validator failed for field "RequestExecution.channel_api_key_suffix": %w`, err)}
 		}
 	}
+	if v, ok := _c.mutation.ChannelAPIKeyFingerprint(); ok {
+		if err := requestexecution.ChannelAPIKeyFingerprintValidator(v); err != nil {
+			return &ValidationError{Name: "channel_api_key_fingerprint", err: fmt.Errorf(`ent: validator failed for field "RequestExecution.channel_api_key_fingerprint": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.RequestBody(); !ok {
 		return &ValidationError{Name: "request_body", err: errors.New(`ent: missing required field "RequestExecution.request_body"`)}
 	}
@@ -563,6 +582,10 @@ func (_c *RequestExecutionCreate) createSpec() (*RequestExecution, *sqlgraph.Cre
 	if value, ok := _c.mutation.ChannelAPIKeySuffix(); ok {
 		_spec.SetField(requestexecution.FieldChannelAPIKeySuffix, field.TypeString, value)
 		_node.ChannelAPIKeySuffix = &value
+	}
+	if value, ok := _c.mutation.ChannelAPIKeyFingerprint(); ok {
+		_spec.SetField(requestexecution.FieldChannelAPIKeyFingerprint, field.TypeString, value)
+		_node.ChannelAPIKeyFingerprint = &value
 	}
 	if value, ok := _c.mutation.RequestBody(); ok {
 		_spec.SetField(requestexecution.FieldRequestBody, field.TypeJSON, value)
@@ -1071,6 +1094,9 @@ func (u *RequestExecutionUpsertOne) UpdateNewValues() *RequestExecutionUpsertOne
 		}
 		if _, exists := u.create.mutation.ChannelAPIKeySuffix(); exists {
 			s.SetIgnore(requestexecution.FieldChannelAPIKeySuffix)
+		}
+		if _, exists := u.create.mutation.ChannelAPIKeyFingerprint(); exists {
+			s.SetIgnore(requestexecution.FieldChannelAPIKeyFingerprint)
 		}
 		if _, exists := u.create.mutation.RequestBody(); exists {
 			s.SetIgnore(requestexecution.FieldRequestBody)
@@ -1650,6 +1676,9 @@ func (u *RequestExecutionUpsertBulk) UpdateNewValues() *RequestExecutionUpsertBu
 			}
 			if _, exists := b.mutation.ChannelAPIKeySuffix(); exists {
 				s.SetIgnore(requestexecution.FieldChannelAPIKeySuffix)
+			}
+			if _, exists := b.mutation.ChannelAPIKeyFingerprint(); exists {
+				s.SetIgnore(requestexecution.FieldChannelAPIKeyFingerprint)
 			}
 			if _, exists := b.mutation.RequestBody(); exists {
 				s.SetIgnore(requestexecution.FieldRequestBody)
